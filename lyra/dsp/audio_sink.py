@@ -35,7 +35,26 @@ class AK4951Sink:
 
 
 class SoundDeviceSink:
-    """Route audio to the PC default playback device."""
+    """Route audio to the PC default playback device.
+
+    Key design choices (documented because they matter for Windows
+    audio interfaces, USB multichannel cards, and S/PDIF outputs):
+
+    - **Prefers WASAPI over MME.** PortAudio's system default on
+      Windows is MME (20+ years old, flaky with S/PDIF and USB audio
+      interfaces, silently drops mono frames on some drivers). We
+      explicitly pick the WASAPI host API's default output device
+      when the caller didn't specify one. WASAPI is what every
+      serious audio app (DAWs, Thetis, ExpertSDR3, browsers) uses.
+
+    - **Opens stereo, writes duplicated mono.** The demod chain is
+      mono (SSB/CW/AM/FM/DIGU all produce a single audio channel).
+      S/PDIF / TOSLINK outputs are rigidly 2-channel and some drivers
+      silently drop mono frames instead of auto-duplicating — so we
+      always open stereo and duplicate the mono sample into both L
+      and R. Harmless on analog outputs (which would have duplicated
+      anyway).
+    """
 
     def __init__(self, rate: int = 48000, device: Optional[int] = None,
                  blocksize: int = 1024):
@@ -48,20 +67,51 @@ class SoundDeviceSink:
             ) from e
         self._sd = sd
         self._rate = rate
+
+        if device is None:
+            device = self._pick_wasapi_default(sd)
+
+        self._channels = 2
         self._stream = sd.OutputStream(
-            samplerate=rate, channels=1, dtype="float32",
+            samplerate=rate, channels=self._channels, dtype="float32",
             blocksize=blocksize, device=device,
         )
         self._stream.start()
 
+    @staticmethod
+    def _pick_wasapi_default(sd):
+        """Find the WASAPI host API's default output device. Returns a
+        device index, or None if WASAPI isn't available (falls through
+        to PortAudio's system default — probably MME on Windows, which
+        is less reliable but not always broken).
+        """
+        try:
+            hostapis = sd.query_hostapis()
+        except Exception:
+            return None
+        for i, ha in enumerate(hostapis):
+            if ha["name"] == "Windows WASAPI":
+                default_out = ha.get("default_output_device", -1)
+                if default_out >= 0:
+                    return default_out
+                return None
+        return None
+
     def write(self, audio: np.ndarray) -> None:
         if audio.size == 0:
             return
-        # Ensure shape (N, 1) for mono
-        a = audio.astype(np.float32).reshape(-1, 1)
+        mono = audio.astype(np.float32).reshape(-1)
+        # Duplicate mono to (N, 2) stereo — mandatory for S/PDIF,
+        # harmless on analog.
+        a = np.stack((mono, mono), axis=1)
         try:
             self._stream.write(a)
         except self._sd.PortAudioError:
+            # Intentionally swallowed: a transient PortAudio error
+            # (e.g., device exclusive-mode grabbed by another app)
+            # should not crash the audio thread. If the user ever
+            # reports "no audio" with a clean stream, re-enable the
+            # diagnostic prints in the git history for this file.
             pass
 
     def close(self) -> None:

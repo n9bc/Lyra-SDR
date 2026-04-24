@@ -590,8 +590,14 @@ class GainPanel(GlassPanel):
     # Perceptual volume curve — 0..100 slider → 0..VOL_MAX multiplier
     # via a power curve, so each slider tick yields a roughly equal
     # loudness step. Human hearing is logarithmic — a linear slider
-    # feels wildly touchy at low volumes. See slider init for table.
-    VOL_MAX = 2.0
+    # feels wildly touchy at low volumes.
+    #
+    # Since the AF Gain split (2026-04-24, Option B), Volume is
+    # purely the FINAL OUTPUT TRIM stage. The makeup gain that was
+    # previously squeezed into Volume's 50× headroom now lives in a
+    # separate AF Gain dB slider, leaving Volume as a clean 0..1.0
+    # (unity-at-max) trim — the role it always should have had.
+    VOL_MAX = 1.0
     VOL_GAMMA = 2.0
 
     @classmethod
@@ -672,6 +678,43 @@ class DspPanel(GlassPanel):
 
         levels.addSpacing(20)
 
+        # AF Gain slider — makeup gain in dB (0..+50), LINEAR (1 tick
+        # = 1 dB). Sits BETWEEN AGC and Volume in the signal path:
+        #     demod → AGC → AF Gain → Volume → tanh → sink
+        # Designed for AGC-off operation (digital modes, contesters,
+        # monitoring) where AGC isn't available to bring the signal
+        # up to listenable level. Set once per station based on your
+        # typical antenna/band level, then forget — Volume rides on
+        # moment-to-moment listening comfort.
+        #
+        # Linear dB mapping (not perceptual curve) because makeup
+        # gain is naturally thought of in dB by operators: "this band
+        # needs another 15 dB" is a concrete adjustment.
+        levels.addWidget(QLabel("AF"))
+        self.af_gain_slider = QSlider(Qt.Horizontal)
+        self.af_gain_slider.setObjectName("af_gain_slider")
+        self.af_gain_slider.setRange(0, 50)
+        self.af_gain_slider.setSingleStep(1)
+        self.af_gain_slider.setPageStep(5)
+        self.af_gain_slider.setValue(int(radio.af_gain_db))
+        self.af_gain_slider.setFixedWidth(120)
+        self.af_gain_slider.setToolTip(
+            "AF Gain — post-demod makeup gain, 0 to +50 dB.\n\n"
+            "Use this when AGC is off (digital modes) or the AGC "
+            "target is too quiet for weak signals. Set once for "
+            "your station's typical signal level, then ride Volume "
+            "for moment-to-moment listening comfort.\n\n"
+            "The tanh limiter after this stage prevents clipping "
+            "at the sink, so you can't damage speakers with high "
+            "AF Gain settings — the worst case is soft saturation.")
+        self.af_gain_slider.valueChanged.connect(self.radio.set_af_gain_db)
+        levels.addWidget(self.af_gain_slider)
+        self.af_gain_label = QLabel(f"+{int(radio.af_gain_db)} dB")
+        self.af_gain_label.setFixedWidth(50)
+        levels.addWidget(self.af_gain_label)
+
+        levels.addSpacing(12)
+
         # Volume slider uses a PERCEPTUAL (quadratic) curve so each
         # 1% tick produces a roughly uniform loudness change. With a
         # linear slider → linear multiplier mapping the bottom end of
@@ -680,12 +723,13 @@ class DspPanel(GlassPanel):
         # curve here rather than calling set_volume(slider/100) directly.
         #
         #   slider 0..100 → multiplier = (slider/100) ** 2 * VOL_MAX
-        #   VOL_MAX = 2.0 keeps an extra 6 dB of headroom above unity.
-        #   At slider=100 → ×2.0  (loudest — hard limit above unity)
-        #   At slider= 71 → ×1.0  (unity gain — "natural" listen level)
-        #   At slider= 50 → ×0.5
-        #   At slider= 25 → ×0.125
-        #   At slider= 10 → ×0.02
+        #   VOL_MAX = 1.0  (Volume is now a pure output trim — makeup
+        #   gain lives in the AF Gain slider to the left.)
+        #   At slider=100 → ×1.0   (unity — full AF-gained signal)
+        #   At slider= 71 → ×0.5   (−6 dB)
+        #   At slider= 50 → ×0.25  (−12 dB — traditional "half")
+        #   At slider= 25 → ×0.0625(−24 dB — quiet listening)
+        #   At slider= 10 → ×0.01  (−40 dB — background)
         levels.addWidget(QLabel("Vol"))
         self.vol_slider = QSlider(Qt.Horizontal)
         self.vol_slider.setObjectName("vol_slider")
@@ -735,35 +779,32 @@ class DspPanel(GlassPanel):
 
         h.addSpacing(14)
 
-        # Notch bank — front-panel footprint kept small. Gestures and
-        # "default Q" live in tooltips + the spectrum/waterfall
-        # right-click context menu so the row doesn't need a second
-        # slider or a four-hundred-pixel legend.
-        self.notch_btn = QPushButton("Notch")
-        self.notch_btn.setCheckable(True)
-        self.notch_btn.setFixedWidth(70)
-        self.notch_btn.setToolTip(
-            "Notch Filter — manual per-frequency notches.\n\n"
-            "On the spectrum or waterfall:\n"
-            "  • Right-click          — menu (Add / Remove nearest / Clear all /\n"
-            "                            Default Q for new notches)\n"
-            "  • Shift + right-click  — quick-remove nearest notch\n"
-            "  • Left-drag a notch    — adjust that notch's Q (width)\n"
-            "  • Wheel over a notch   — adjust that notch's Q (width)")
-        self.notch_btn.toggled.connect(self.radio.set_notch_enabled)
-        h.addWidget(self.notch_btn)
-
-        # Compact live counter replaces the old legend-heavy info
-        # label. Shows "N notches" + per-notch Qs when present.
-        # Full gesture hints are on the Notch button's tooltip above.
-        # NO stretch factor here — the old layout used stretch=1 which
-        # made the label expand to fill the entire row, leaving a
-        # long empty band that looked like broken UI. addStretch below
-        # pushes empty space to the end instead so the counter stays
-        # tight against the Notch button.
+        # Notch bank — no dedicated "Notch" button here anymore. The
+        # NF button in the DSP row below is the single source of
+        # truth for enable/disable. Having TWO buttons on the same
+        # Radio.set_notch_enabled toggle was confusing (they both lit
+        # together, which looked like duplicated feedback). We keep
+        # only the compact live counter here so the operator can see
+        # how many notches are active without looking down at the
+        # DSP row.
+        # Full gesture hints live on the NF button's tooltip (see the
+        # DSP row below) and are mirrored onto this counter.
         self.notch_info = QLabel("0 notches")
         self.notch_info.setMinimumWidth(120)
-        self.notch_info.setToolTip(self.notch_btn.toolTip())
+        self._notch_tooltip = (
+            "Notch Filter — manual per-frequency notches. Toggle\n"
+            "on/off via the NF button on the DSP row below.\n\n"
+            "On the spectrum or waterfall (NF must be ON):\n"
+            "  • Right-click          — menu (Add / Remove nearest /\n"
+            "                            Clear all / Default Q for\n"
+            "                            new notches / Disable)\n"
+            "  • Shift + right-click  — quick-remove nearest notch\n"
+            "  • Left-drag a notch    — adjust that notch's Q (width)\n"
+            "  • Wheel over a notch   — adjust that notch's Q (width)\n\n"
+            "When NF is OFF, right-click shows a single 'Enable Notch\n"
+            "Filter' item — right-click stays reserved for other\n"
+            "spectrum features until you turn NF on.")
+        self.notch_info.setToolTip(self._notch_tooltip)
         h.addWidget(self.notch_info)
         h.addStretch(1)
 
@@ -803,8 +844,13 @@ class DspPanel(GlassPanel):
             self.dsp_btns[label] = btn
 
         # Wire the ones we already implement; rest are visual-only stubs.
+        # NF is now the single enable/disable button for notches — the
+        # earlier standalone "Notch" button on the row above was
+        # removed (it duplicated this one; both lit together, which
+        # read as broken UI feedback).
         self.dsp_btns["NF"].setChecked(radio.notch_enabled)
         self.dsp_btns["NF"].toggled.connect(self.radio.set_notch_enabled)
+        self.dsp_btns["NF"].setToolTip(self._notch_tooltip)
 
         # ── NR (Noise Reduction) ─────────────────────────────────
         # Left-click  = toggle enable/disable
@@ -899,7 +945,10 @@ class DspPanel(GlassPanel):
         self._agc_paint_timer.start()
 
         radio.notches_changed.connect(self._on_notches_changed)
-        radio.notch_enabled_changed.connect(self.notch_btn.setChecked)
+        # NF button is the sole notch enable/disable UI now; the
+        # standalone "Notch" button that used to mirror this signal
+        # was removed to eliminate the confusing "two buttons light
+        # together" feedback.
         radio.notch_enabled_changed.connect(self.dsp_btns["NF"].setChecked)
         # notch_q_changed formerly drove a front-panel slider; the
         # slider was removed (see DSP row notes). Keep no-op so future
@@ -911,6 +960,9 @@ class DspPanel(GlassPanel):
         # LNA gain + Volume feedback (previously lived in GainPanel)
         radio.gain_changed.connect(self._on_gain_changed)
         radio.volume_changed.connect(self._on_volume_changed)
+        # AF Gain state sync — covers QSettings load and future TCI
+        # / CAT remote-control adjustments.
+        radio.af_gain_db_changed.connect(self._on_af_gain_db_changed)
         # Mute + Auto-LNA state sync (signals driven by Radio — covers
         # QSettings load + any future TCI / CAT mute command).
         radio.muted_changed.connect(self._on_muted_changed)
@@ -919,8 +971,14 @@ class DspPanel(GlassPanel):
     # Perceptual volume curve — 0..100 slider → 0..VOL_MAX multiplier
     # via a power curve, so each slider tick yields a roughly equal
     # loudness step. Human hearing is logarithmic — a linear slider
-    # feels wildly touchy at low volumes. See slider init for table.
-    VOL_MAX = 2.0
+    # feels wildly touchy at low volumes.
+    #
+    # Since the AF Gain split (2026-04-24, Option B), Volume is
+    # purely the FINAL OUTPUT TRIM stage. The makeup gain that was
+    # previously squeezed into Volume's 50× headroom now lives in a
+    # separate AF Gain dB slider, leaving Volume as a clean 0..1.0
+    # (unity-at-max) trim — the role it always should have had.
+    VOL_MAX = 1.0
     VOL_GAMMA = 2.0
 
     @classmethod
@@ -955,6 +1013,15 @@ class DspPanel(GlassPanel):
             self.vol_slider.blockSignals(True)
             self.vol_slider.setValue(target)
             self.vol_slider.blockSignals(False)
+
+    def _on_af_gain_db_changed(self, db: int):
+        """Radio AF Gain changed elsewhere — keep slider + label in
+        sync (e.g. QSettings load, future TCI/CAT control)."""
+        self.af_gain_label.setText(f"+{db} dB")
+        if self.af_gain_slider.value() != db:
+            self.af_gain_slider.blockSignals(True)
+            self.af_gain_slider.setValue(db)
+            self.af_gain_slider.blockSignals(False)
 
     def _on_muted_changed(self, muted: bool):
         """Radio mute state changed (e.g., via TCI, QSettings load).

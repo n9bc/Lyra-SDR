@@ -74,6 +74,7 @@ class Radio(QObject):
     mode_changed         = Signal(str)
     gain_changed         = Signal(int)
     volume_changed       = Signal(float)
+    af_gain_db_changed   = Signal(int)   # AF makeup gain, 0..+50 dB
     rx_bw_changed        = Signal(str, int)       # mode, Hz
     tx_bw_changed        = Signal(str, int)
     bw_lock_changed      = Signal(bool)
@@ -121,6 +122,7 @@ class Radio(QObject):
     muted_changed      = Signal(bool)        # True = muted
     lna_auto_changed   = Signal(bool)        # True = auto-adjusting
     lna_peak_dbfs      = Signal(float)       # live ADC peak, for UI readout
+    lna_rms_dbfs       = Signal(float)       # live ADC RMS, companion to peak
 
     # Noise Reduction (NR) — classical spectral subtraction backend.
     # Profile name ∈ {"light","medium","aggressive","neural"}; "neural"
@@ -223,7 +225,18 @@ class Radio(QObject):
         self._rate = 48000
         self._mode = "USB"
         self._gain_db = 19
-        self._volume = 1.0
+        # Volume chain — TWO stages since 2026-04-24:
+        #   AF Gain (af_gain_db): makeup gain in dB, for cases where
+        #     AGC is off (digital modes like FT8 run AGC off to avoid
+        #     pumping) or AGC target is low relative to the weak-
+        #     signal demod output. Set once per station/band, forget.
+        #     Range 0..+50 dB.
+        #   Volume: final output trim, 0..1.0 multiplier driven by a
+        #     perceptual-curve slider 0..100%. Ride this for moment-
+        #     to-moment loudness comfort.
+        # Chain: demod → AGC (if on) → AF Gain → Volume → tanh → sink
+        self._af_gain_db = 0                    # integer dB, 0..+50
+        self._volume = 0.5                      # 50% = ~-12 dB trim
         self._muted = False
         # Auto-LNA loop: periodically adjust _gain_db to keep the ADC
         # peak near a target headroom. Engaged only when the operator
@@ -236,6 +249,7 @@ class Radio(QObject):
         # percentile over this window drives the control loop (ignores
         # brief transient spikes).
         self._lna_peaks: list[float] = []
+        self._lna_rms: list[float] = []      # parallel to _lna_peaks
         self._lna_peaks_max = 120
         self._lna_current_peak_dbfs = -120.0
         self._rx_bw_by_mode = dict(self.BW_DEFAULTS)
@@ -291,7 +305,21 @@ class Radio(QObject):
         # directly. "off" disables AGC entirely — volume scales the
         # raw demod output.
         self._agc_peak = 0.01
-        self._agc_target = 0.3
+        # AGC target 0.0316 linear = -30 dBFS peak. Progression:
+        #   0.3  (-10 dBFS)  pre-AF-Gain-split — too hot, AGC had to
+        #                    do all the work, stacked with AF caused
+        #                    clipping/tanh saturation
+        #   0.1  (-20 dBFS)  AF-split era — still too hot, on/off
+        #                    delta was ~17 dB (noticeable)
+        #   0.0316(-30 dBFS) current — matches Thetis's typical target;
+        #                    AGC does less aggressive work, preserves
+        #                    dynamic range better, on/off delta drops
+        #                    to ~8-10 dB (the "Thetis slight feel"
+        #                    operators expect)
+        # Trade-off: requires slightly higher Vol slider for same
+        # loudness, but the user gains more expressive dynamic range
+        # on signals and much less AGC pumping on digital modes.
+        self._agc_target = 0.0316
         self._agc_profile = "med"        # off / fast / med / slow / custom
         self._agc_release = 0.003
         self._agc_hang_blocks = 23
@@ -664,9 +692,39 @@ class Radio(QObject):
         self.gain_changed.emit(db)
 
     def set_volume(self, v: float):
-        v = max(0.0, min(3.0, float(v)))
+        # Volume is now purely a final trim stage (post AF Gain), so
+        # its effective range is 0..1.0 (0 = silent, 1 = unity pass of
+        # AF-gained signal). Old QSettings values in the 0..3.0 range
+        # from pre-split code get clamped to 1.0 at load time; the
+        # operator can re-dial to taste from there.
+        v = max(0.0, min(1.0, float(v)))
         self._volume = v
         self.volume_changed.emit(v)
+
+    # ── AF Gain (post-AGC, pre-Volume makeup gain) ────────────────────
+    @property
+    def af_gain_db(self) -> int:
+        return self._af_gain_db
+
+    def set_af_gain_db(self, db: int):
+        """Integer dB, clamped 0..+50. Applied in _apply_agc_and_volume
+        as a linear multiplier between AGC and Volume. Dedicated stage
+        so operators running AGC off on digital modes have a natural
+        "station loudness" knob independent of moment-to-moment
+        Volume trim."""
+        db = max(0, min(50, int(db)))
+        if db == self._af_gain_db:
+            return
+        self._af_gain_db = db
+        self.af_gain_db_changed.emit(db)
+
+    @property
+    def af_gain_linear(self) -> float:
+        # Cached linear multiplier — used by the audio loop to avoid
+        # doing 10^(db/20) per block. Trivial to compute on-demand
+        # since it's just integer dB, but kept as a property for
+        # clarity at call sites.
+        return 10.0 ** (self._af_gain_db / 20.0)
 
     # ── Mute ────────────────────────────────────────────────────────
     @property
@@ -974,6 +1032,7 @@ class Radio(QObject):
         if enabled:
             # Reset history so we evaluate from current conditions
             self._lna_peaks = []
+            self._lna_rms = []
             self._lna_auto_timer.start()
         else:
             self._lna_auto_timer.stop()
@@ -981,17 +1040,34 @@ class Radio(QObject):
 
     def _emit_peak_reading(self):
         """Periodic (4 Hz) ADC peak broadcast — drives the toolbar
-        indicator. Independent of Auto-LNA state. Uses max-of-window
-        so brief clipping shows up in the reading rather than being
-        averaged away."""
+        indicator. Independent of Auto-LNA state.
+
+        Uses a SHORT window (last ~20 block peaks ≈ 200 ms) instead
+        of the full rolling history, so LNA changes are reflected in
+        the reading within a fraction of a second rather than taking
+        1+ seconds for the stale max to decay out. This matches how
+        Thetis's RFP and ExpertSDR3's ADC meter behave — responsive
+        to the current signal environment, not a rolling worst-case.
+        """
         if not self._lna_peaks:
             return
-        p = max(self._lna_peaks)
-        if p <= 1e-6:
-            return
-        db = 20.0 * float(np.log10(p))
-        self._lna_current_peak_dbfs = db
-        self.lna_peak_dbfs.emit(db)
+        # Use last ~200ms for responsiveness, not the full 1.28 s
+        # history window that _lna_peaks_max holds. The longer window
+        # is still tracked for Auto-LNA's overload-protection logic,
+        # which legitimately wants the worst-case peak.
+        recent_peaks = (self._lna_peaks[-20:]
+                        if len(self._lna_peaks) >= 20 else self._lna_peaks)
+        recent_rms = (self._lna_rms[-20:]
+                      if len(self._lna_rms) >= 20 else self._lna_rms)
+        p = max(recent_peaks) if recent_peaks else 0.0
+        r = (sum(x * x for x in recent_rms) / len(recent_rms)) ** 0.5 if recent_rms else 0.0
+        # Convert to dBFS; floor at something sensible to avoid -inf
+        # when the stream is still starting up.
+        peak_db = 20.0 * float(np.log10(max(p, 1e-6)))
+        rms_db = 10.0 * float(np.log10(max(r * r, 1e-12)))
+        self._lna_current_peak_dbfs = peak_db
+        self.lna_peak_dbfs.emit(peak_db)
+        self.lna_rms_dbfs.emit(rms_db)
 
     def _adjust_lna_auto(self):
         """Overload-protection LNA loop — modeled on the reference HPSDR client's Auto-ATT
@@ -1046,6 +1122,7 @@ class Radio(QObject):
             f"Auto-LNA: peak {peak_dbfs:+.1f} dBFS → LNA {new_db:+d} dB",
             2000)
         self._lna_peaks = []
+        self._lna_rms = []
 
     def set_rx_bw(self, mode: str, bw: int):
         self._rx_bw_by_mode[mode] = int(bw)
@@ -1593,6 +1670,7 @@ class Radio(QObject):
             self._sample_ring.clear()
         self._audio_buf.clear()
         self._lna_peaks = []
+        self._lna_rms = []
         self.stream_state_changed.emit(False)
 
     def discover(self):
@@ -1624,14 +1702,22 @@ class Radio(QObject):
     def _on_samples_main_thread(self, samples):
         with self._ring_lock:
             self._sample_ring.extend(samples)
-        # Track IQ peak magnitude for Auto-LNA. One float per block;
-        # cheap. Clamped history size keeps memory bounded. We only do
-        # the percentile crunch in _adjust_lna_auto (rare), not here.
+        # Track IQ peak AND RMS magnitude for Auto-LNA + toolbar readout.
+        # Peak captures transients (good for clipping detection), RMS
+        # tracks steady-state signal energy (good for level linearity
+        # diagnostics — responds predictably to LNA gain changes).
+        # Cheap to compute per block; history size clamped.
         if len(samples) > 0:
-            peak = float(np.max(np.abs(samples)))
+            mag_sq = (samples.real * samples.real
+                      + samples.imag * samples.imag)
+            peak = float(np.sqrt(np.max(mag_sq)))
+            rms = float(np.sqrt(np.mean(mag_sq)))
             self._lna_peaks.append(peak)
+            self._lna_rms.append(rms)
             if len(self._lna_peaks) > self._lna_peaks_max:
                 self._lna_peaks.pop(0)
+            if len(self._lna_rms) > self._lna_peaks_max:
+                self._lna_rms.pop(0)
         self._do_demod(samples)
 
     def _do_demod(self, iq):
@@ -1675,19 +1761,44 @@ class Radio(QObject):
         t = (np.arange(n) + self._tone_phase) / rate
         audio = (0.3 * np.sin(2 * np.pi * 1000.0 * t)).astype(np.float32)
         self._tone_phase = (self._tone_phase + n) % rate
-        audio = audio * (0.0 if self._muted else self._volume)
+        # Tone uses the same AF Gain + Volume chain as demod output
+        # so the operator's listening level stays consistent when
+        # switching to Mode → Tone for rig testing.
+        af = self.af_gain_linear
+        vol = 0.0 if self._muted else self._volume
+        audio = audio * af * vol
         try:
             self._audio_sink.write(audio)
         except Exception:
             pass
 
     def _apply_agc_and_volume(self, audio):
+        # Chain: audio → AF Gain (pre-AGC makeup) → AGC → Volume → tanh
+        #
+        # AF Gain sits BEFORE AGC for two critical reasons:
+        #   1. When AGC is ON, it normalizes to target regardless of
+        #      AF Gain — so AF just feeds more signal into AGC, which
+        #      needs to do less work. Output level stays at target.
+        #      This prevents the "AF + AGC stack and clip" bug.
+        #   2. When AGC is OFF (FT8/FT4/digital modes where pumping
+        #      is unwanted), AF Gain is the manual makeup gain — the
+        #      only way to bring weak signals up to audible.
+        #
+        # Net effect: switching AGC on ↔ off produces only a slight
+        # loudness delta (matches Thetis behaviour). Vol slider has a
+        # useful full range in both AGC-on and AGC-off modes.
+        #
         # Mute multiplies final gain by 0 — keeps everything else
         # (AGC state, noise-floor tracking, meter feeds) running so
         # unmuting doesn't cause a glitch.
         vol = 0.0 if self._muted else self._volume
+        af = self.af_gain_linear
+        # Apply AF Gain first — same for both AGC paths.
+        audio = audio * af
         if self._agc_profile == "off":
-            # AGC disabled — volume scales the raw demod output directly.
+            # AGC disabled — AF Gain + Volume scale the raw demod
+            # output. Critical for digital modes (FT8/FT4/RTTY)
+            # where operators intentionally run AGC off.
             out = audio * vol
             return np.tanh(out).astype(np.float32)
 
@@ -1709,13 +1820,25 @@ class Radio(QObject):
             self._agc_peak *= (1.0 - self._agc_release)
         self._agc_peak = max(self._agc_peak, 1e-4)
 
-        agc_gain = min(self._agc_target / self._agc_peak, 10.0)
+        # AGC max gain cap. Was previously 10× (20 dB), which was far
+        # too conservative — any signal below ~-30 dBFS couldn't be
+        # boosted to audible levels. Professional SDR clients give
+        # 80-120 dB of AGC range (Thetis, ExpertSDR3, FT-DX10). We
+        # use 1000× (60 dB) as a safe middle ground: lets weak
+        # signals down to ~-70 dBFS reach audible levels, but the
+        # final tanh limiter still prevents any amplitude damage at
+        # the speaker. Strong signals aren't affected — they hit
+        # target well before the cap matters.
+        AGC_MAX_GAIN = 1000.0   # 60 dB maximum AGC gain
+        agc_gain = min(self._agc_target / self._agc_peak, AGC_MAX_GAIN)
         # Report the current AGC action to meters / diagnostics
         try:
             action_db = 20.0 * np.log10(max(agc_gain, 1e-6))
             self.agc_action_db.emit(float(action_db))
         except Exception:
             pass
+        # Final: audio-already-AF-scaled × AGC × Volume → tanh
+        # (AF Gain was applied BEFORE the AGC tracker above.)
         audio = audio * agc_gain * vol
         return np.tanh(audio).astype(np.float32)
 

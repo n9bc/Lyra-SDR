@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (
 from lyra.radio import Radio
 from lyra.ui import theme
 from lyra.ui.panels import (
-    TuningPanel, ModeFilterPanel, GainPanel, DspPanel,
+    TuningPanel, ModeFilterPanel, DspPanel,
     SMeterPanel, SpectrumPanel, WaterfallPanel, TciPanel, BandPanel,
     ViewPanel,
 )
@@ -83,7 +83,17 @@ class MainWindow(QMainWindow):
         self.pnl_mode       = ModeFilterPanel(self.radio)
         self.pnl_view       = ViewPanel(self.radio)
         self.pnl_band       = BandPanel(self.radio)
-        self.pnl_gain       = GainPanel(self.radio)
+        # GainPanel is DELETED: it had an old 0-300 range slider with a
+        # linear v/100 mapping, while DspPanel uses a 0-100 slider with
+        # a perceptual power curve. Both panels connected to
+        # radio.volume_changed and to radio.set_volume via different
+        # formulas, so every value-change cascade made the two panels
+        # ricochet each other through QSettings until the volume
+        # slammed to bizarre values (0.24 → 2.00 → 0.02 → 0.10) in
+        # the first few seconds of runtime. Hiding GainPanel wasn't
+        # enough — its widgets + signal connections stay live when a
+        # panel is .hide()'d, only invisible. We must not construct
+        # it at all.
         self.pnl_dsp        = DspPanel(self.radio)
         self.pnl_smeter     = SMeterPanel(self.radio)
         self.pnl_spectrum   = SpectrumPanel(self.radio)
@@ -135,13 +145,9 @@ class MainWindow(QMainWindow):
             "meters", "Meters", self.pnl_smeter)
         self.docks["dsp"] = self._make_dock(
             "dsp_audio", "DSP + Audio", self.pnl_dsp)
-        # GainPanel is intentionally NOT docked — LNA + Volume sliders
-        # now live as the top row of the DSP + AUDIO panel (they're
-        # "amount of signal" knobs, which belong next to the AGC
-        # readout that drives them). The class is kept for any
-        # existing code paths; simply not shown.
-        self.pnl_gain.setParent(self)
-        self.pnl_gain.hide()
+        # GainPanel removed entirely — see comment at construction site.
+        # Its LNA + Vol sliders duplicated DspPanel's and fought for
+        # radio.volume via incompatible mappings.
         # TciPanel is intentionally NOT docked — it's a space waste when
         # TCI is working fine (which is most of the time). The panel is
         # still instantiated so the TciServer it owns stays alive; state
@@ -300,24 +306,35 @@ class MainWindow(QMainWindow):
         server.client_count_changed.connect(self._update_tci_indicator)
         self._update_tci_indicator()
 
-        # ── ADC peak indicator ─────────────────────────────────────
-        # Live dBFS readout of the incoming IQ peak envelope. The
-        # single most useful diagnostic for RF-chain health —
-        # clipping, too hot, sweet spot, weak signal. Color-coded.
-        # Fed by radio.lna_peak_dbfs at ~4 Hz while streaming.
-        self.adc_peak_indicator = QLabel("  ADC  --  dBFS  ")
+        # ── ADC peak + RMS indicator ───────────────────────────────
+        # Dual readout: peak shows clipping margin (headroom), RMS
+        # shows signal-energy level (predictable under LNA gain
+        # changes, useful for linearity diagnostics). On a noise
+        # floor, typical peak/RMS crest factor is ~10-12 dB.
+        # Fed by radio.lna_peak_dbfs + lna_rms_dbfs at ~4 Hz.
+        self.adc_peak_indicator = QLabel("  ADC pk --  rms --  dBFS  ")
         self.adc_peak_indicator.setStyleSheet(
             "color: #6a7a8c; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 4px;")
         self.adc_peak_indicator.setToolTip(
-            "Live ADC peak magnitude in dBFS:\n"
+            "Live ADC levels in dBFS (peak / RMS).\n\n"
+            "PEAK — instantaneous maximum magnitude, used for\n"
+            "clipping / headroom diagnostics:\n"
             "  > -3 dBFS  CLIPPING — drop LNA immediately\n"
             "  -3 to -10  Hot / IMD risk\n"
             "  -10 to -30 Sweet spot\n"
             "  -30 to -50 Acceptable / weak-signal friendly\n"
-            "  < -50     Low — raise LNA or check antenna")
+            "  < -50     Low — raise LNA or check antenna\n\n"
+            "RMS — steady-state signal energy. Tracks LNA\n"
+            "changes linearly (1 dB LNA = 1 dB RMS), so it's\n"
+            "the reliable measurement for chain-linearity tests.\n"
+            "Typical peak-RMS difference on noise: ~10-12 dB.")
+        self.adc_peak_indicator.setMinimumWidth(220)
         tb.addWidget(self.adc_peak_indicator)
+        self._adc_peak_db = -160.0
+        self._adc_rms_db = -160.0
         self.radio.lna_peak_dbfs.connect(self._update_adc_peak)
+        self.radio.lna_rms_dbfs.connect(self._update_adc_rms)
 
         tb.addSeparator()
 
@@ -393,24 +410,43 @@ class MainWindow(QMainWindow):
             self.status_dot.setStyleSheet("color: #8a9aac; font-weight: 600;")
             # Reset the ADC peak indicator to a dim placeholder — no
             # stream, no meaningful reading.
-            self.adc_peak_indicator.setText("  ADC  --  dBFS  ")
+            self._adc_peak_db = -160.0
+            self._adc_rms_db = -160.0
+            self.adc_peak_indicator.setText("  ADC pk --  rms --  dBFS  ")
             self.adc_peak_indicator.setStyleSheet(
                 "color: #6a7a8c; font-family: Consolas, monospace; "
                 "font-weight: 700; padding: 0 4px;")
 
     def _update_adc_peak(self, dbfs: float):
-        """Color-code the ADC peak indicator by zone (4 Hz update)."""
-        if dbfs > -3.0:
+        """Store latest peak and repaint the combined indicator."""
+        self._adc_peak_db = dbfs
+        self._repaint_adc_indicator()
+
+    def _update_adc_rms(self, dbfs: float):
+        """Store latest RMS and repaint the combined indicator."""
+        self._adc_rms_db = dbfs
+        self._repaint_adc_indicator()
+
+    def _repaint_adc_indicator(self):
+        """Render the combined peak + RMS readout with color coding
+        driven by the PEAK value (that's what you care about for
+        clipping / headroom). RMS is shown alongside as a diagnostic
+        for chain linearity — a 1 dB LNA change should move RMS by
+        ~1 dB; peak can jitter much more due to transients."""
+        pk = self._adc_peak_db
+        rms = self._adc_rms_db
+        if pk > -3.0:
             color = "#ff4040"        # clipping — red
-        elif dbfs > -10.0:
+        elif pk > -10.0:
             color = "#ff8c3a"        # hot — orange
-        elif dbfs > -30.0:
+        elif pk > -30.0:
             color = "#39ff14"        # sweet spot — green
-        elif dbfs > -50.0:
+        elif pk > -50.0:
             color = "#7fd9ff"        # acceptable — light cyan
         else:
             color = "#8a9aac"        # low — muted gray
-        self.adc_peak_indicator.setText(f"  ADC {dbfs:+5.1f} dBFS  ")
+        self.adc_peak_indicator.setText(
+            f"  ADC pk {pk:+5.1f}  rms {rms:+5.1f}  dBFS  ")
         self.adc_peak_indicator.setStyleSheet(
             f"color: {color}; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 4px;")
@@ -551,7 +587,16 @@ class MainWindow(QMainWindow):
             try: r.set_gain_db(int(s.value("gain")))
             except (TypeError, ValueError): pass
         if s.contains("volume"):
-            try: r.set_volume(float(s.value("volume")))
+            try:
+                # Migration: pre-AF-Gain-split QSettings had volume in
+                # 0..3.0 range (the old VOL_MAX era). set_volume now
+                # clamps to 0..1.0, so legacy values silently snap to
+                # full output — the operator can re-dial to taste.
+                r.set_volume(float(s.value("volume")))
+            except (TypeError, ValueError):
+                pass
+        if s.contains("af_gain_db"):
+            try: r.set_af_gain_db(int(s.value("af_gain_db")))
             except (TypeError, ValueError): pass
         if s.contains("audio_output"):  r.set_audio_output(str(s.value("audio_output")))
         if s.contains("bw_locked"):
@@ -723,6 +768,7 @@ class MainWindow(QMainWindow):
         s.setValue("mode", r.mode)
         s.setValue("gain", r.gain_db)
         s.setValue("volume", r.volume)
+        s.setValue("af_gain_db", r.af_gain_db)
         s.setValue("audio_output", r.audio_output)
         s.setValue("bw_locked", r.bw_locked)
         s.setValue("filter_board", r.filter_board_enabled)
