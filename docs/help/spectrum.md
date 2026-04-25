@@ -13,11 +13,12 @@
   carrier, CW = narrow box around the CW pitch, AM/FM = ±BW/2). Any
   signal inside the rect is reaching the demod; signals outside are
   blocked by the filter. Updates live as you change mode / RX BW.
-- **Notch wells** — red V-shaped overlays descending from the top of
-  the panadapter for every active notch. The well contour follows
-  the biquad magnitude response so you see both **width** (horizontal
-  extent) and **depth** (how far the well drops, labeled up to
-  −40 dB). See the [Notch Filters](notches.md) topic.
+- **Notch rectangles** — filled red rectangles spanning each notch's
+  −3 dB bandwidth, with a thin red center line for precise targeting.
+  Active notches are saturated red; inactive (bypassed) notches are
+  desaturated grey so you can A/B without losing placement. Width is
+  in Hz, labeled next to the rectangle when there's room. See the
+  [Notch Filters](notches.md) topic.
 - **Band-plan overlay** — optional colored strip at the top of the
   spectrum showing regional sub-band allocations (CW / DIG / SSB / FM)
   with landmark triangles at FT8/FT4/WSPR/PSK frequencies. Click a
@@ -129,8 +130,9 @@ you're not actively working notches.
 - **Over empty spectrum** — zooms bandwidth. Up = zoom in, down =
   zoom out. Steps through the preset zoom levels (1× / 2× / 4× / 8×
   / 16×).
-- **Over a notch well** — adjusts that notch's Q (width). Up = higher
-  Q (narrower), down = lower Q (wider).
+- **Over a notch rectangle** — adjusts that notch's width. Up =
+  narrower (lower Hz), down = wider. 15% per click. See the
+  [Notch Filters](notches.md) topic for full details.
 
 ## Draggable overlays
 
@@ -138,8 +140,8 @@ you're not actively working notches.
   passband rect) — grab and drag horizontally to adjust the current
   mode's RX BW on the fly. The Settings → Mode + Filter BW combo
   updates live.
-- **Notch wells** — left-drag vertically over a notch to fine-tune
-  its Q. Drag up = higher Q (narrower); down = lower Q (wider).
+- **Notch rectangles** — left-drag vertically over a notch to
+  fine-tune its width. Drag up = narrower; down = wider.
 - **dB-scale Y-axis (rightmost 50 px strip)** — drag vertically in
   the right-edge zone to rescale the spectrum:
   - Top third → adjusts `max_db` (pulls the top of the scale)
@@ -239,7 +241,7 @@ magnifies around your RX frequency. Levels: **1× / 2× / 4× / 8× /
 display change.
 
 Two ways to switch:
-- **Mouse wheel** on empty spectrum (not over a notch well) — each
+- **Mouse wheel** on empty spectrum (not over a notch rectangle) — each
   tick steps one level. Up = zoom in, down = zoom out.
 - **Settings → Visuals → Panadapter zoom** combo, or the front-panel
   **VIEW** Zoom slider.

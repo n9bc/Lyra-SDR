@@ -55,8 +55,8 @@
 | Right-click (**NF off**)                 | Minimal menu — "Enable Notch Filter" only (right-click reserved for future features) |
 | Shift + Right-click (**NF on**)          | Quick-remove nearest notch                                       |
 | Mouse wheel (open spectrum)              | Zoom BW (1× / 2× / 4× / 8× / 16×)                                |
-| Mouse wheel (over a notch well)          | Adjust that notch's Q                                            |
-| Left-drag vertically on a notch well     | Fine-tune that notch's Q (up = narrower, down = wider)           |
+| Mouse wheel (over a notch rectangle)     | Adjust that notch's width (up = narrower, down = wider)           |
+| Left-drag vertically on a notch rectangle | Fine-tune that notch's width (up = narrower, down = wider)        |
 | Left-drag on a passband edge             | Adjust current mode's RX BW live                                 |
 | Left-drag in rightmost 50 px strip       | Rescale Y-axis — top = `max_db`, middle = pan, bottom = `min_db` |
 

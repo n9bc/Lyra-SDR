@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -35,6 +36,25 @@ from lyra.bands import band_for_freq
 class _SampleBridge(QObject):
     """Tiny helper to cross threads: RX thread -> Qt main thread."""
     samples_ready = Signal(object)
+
+
+@dataclass
+class Notch:
+    """One manual notch in the user's notch bank.
+
+    Width-based model (matches Thetis / ExpertSDR3 mental model):
+    operators think in absolute "kill this 100 Hz wide chunk", not
+    in dimensionless Q values. Internal filter design converts
+    width_hz to whatever the underlying scipy call needs.
+
+    Per-notch `active` flag means an operator can disable a notch
+    (greys out on the spectrum, bypassed in DSP) without losing
+    the placement — useful for A/B-ing whether a notch is helping.
+    """
+    abs_freq_hz: float          # absolute sky frequency of notch center
+    width_hz: float             # -3 dB bandwidth in Hz
+    active: bool                # individually enableable; False = bypass
+    filter: NotchFilter         # the actual DSP object
 
 
 class _Decimator:
@@ -78,9 +98,9 @@ class Radio(QObject):
     rx_bw_changed        = Signal(str, int)       # mode, Hz
     tx_bw_changed        = Signal(str, int)
     bw_lock_changed      = Signal(bool)
-    notches_changed      = Signal(list)           # list[(freq_hz, q)] tuples
+    notches_changed      = Signal(list)           # list[Notch] (see dataclass above)
     notch_enabled_changed = Signal(bool)
-    notch_q_changed      = Signal(float)
+    notch_default_width_changed = Signal(float)   # default width for new notches, in Hz
     audio_output_changed = Signal(str)
     ip_changed           = Signal(str)
 
@@ -355,11 +375,14 @@ class Radio(QObject):
         self._peak_report_timer.timeout.connect(self._emit_peak_reading)
         # Started when stream starts, stopped when stream stops.
 
-        # Each notch is (abs_freq_hz, q, NotchFilter). Q can be changed
-        # per-notch via mouse wheel on the spectrum/waterfall near the notch.
-        self._notches: list[tuple[float, float, NotchFilter]] = []
+        # Notch bank — list of Notch dataclasses (see top of file).
+        # Operators add/remove via right-click on spectrum/waterfall;
+        # each notch carries its own width and active flag. Default
+        # width 80 Hz comfortably covers FT8 (47 Hz spread) on first
+        # placement; operator can adjust per-notch via wheel/drag.
+        self._notches: list[Notch] = []
         self._notch_enabled = False
-        self._notch_q_default = 30.0
+        self._notch_default_width_hz = 80.0
 
         # TCI spots — keyed by callsign, capped size, oldest-first eviction.
         self._spots: dict[str, dict] = {}   # call -> {call, mode, freq_hz, color, ts}
@@ -500,13 +523,27 @@ class Radio(QObject):
     @property
     def bw_locked(self): return self._bw_locked
     @property
-    def notches(self): return [f for f, _, _ in self._notches]
+    def notches(self) -> list[Notch]:
+        """Live list of notch objects. Read-only — use add_notch /
+        remove_nearest_notch / set_notch_width_at / etc. to mutate."""
+        return list(self._notches)
     @property
-    def notch_details(self): return [(f, q) for f, q, _ in self._notches]
+    def notch_freqs(self) -> list[float]:
+        """Just the absolute centre frequencies, for legacy callers."""
+        return [n.abs_freq_hz for n in self._notches]
+    @property
+    def notch_details(self) -> list[tuple[float, float, bool]]:
+        """(freq_hz, width_hz, active) tuples — what's emitted on
+        notches_changed. Stable shape so UI/TCI can subscribe without
+        depending on the Notch dataclass internals."""
+        return [(n.abs_freq_hz, n.width_hz, n.active) for n in self._notches]
     @property
     def notch_enabled(self): return self._notch_enabled
     @property
-    def notch_q(self): return self._notch_q_default
+    def notch_default_width_hz(self) -> float:
+        """Width used for newly-placed notches. Operator changes via
+        the right-click 'Default width for new notches' submenu."""
+        return self._notch_default_width_hz
     @property
     def audio_output(self): return self._audio_output
     @property
@@ -603,11 +640,18 @@ class Radio(QObject):
                 "Audio restored to AK4951 at 48 k", 2500)
 
     def _rebuild_notches(self):
+        """Re-design every notch's underlying filter — needed when
+        sample rate or VFO frequency changes (since both affect the
+        baseband offset that the filter is centered on). Preserves
+        each notch's width and active flag."""
         rebuilt = []
-        for freq, q, _ in self._notches:
-            nf = self._make_notch(freq, q)
+        for n in self._notches:
+            nf = self._make_notch_filter(n.abs_freq_hz, n.width_hz)
             if nf:
-                rebuilt.append((freq, q, nf))
+                rebuilt.append(Notch(
+                    abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
+                    active=n.active, filter=nf,
+                ))
         self._notches = rebuilt
         if self._notch_enabled:
             self.notches_changed.emit(self.notch_details)
@@ -1311,53 +1355,120 @@ class Radio(QObject):
         except Exception as e:
             self.status_message.emit(f"USB-BCD write failed: {e}", 4000)
 
-    def set_notch_q_default(self, q: float):
-        """Change the Q used for newly placed notches. Existing notches
-        keep their individual Q unless explicitly adjusted."""
-        self._notch_q_default = float(q)
-        self.notch_q_changed.emit(self._notch_q_default)
+    # ── Notch bank API ────────────────────────────────────────────────
+    # All operator-facing notch operations live here. Width is the
+    # primary parameter (Hz, not Q). The IIR filter design is in
+    # _make_notch_filter; this layer just manages the bank.
 
-    def add_notch(self, abs_freq_hz: float):
-        q = self._notch_q_default
-        nf = self._make_notch(abs_freq_hz, q)
-        if nf:
-            self._notches.append((abs_freq_hz, q, nf))
-            if not self._notch_enabled:
-                self.set_notch_enabled(True)
-            self.notches_changed.emit(self.notch_details)
+    NOTCH_WIDTH_MIN_HZ = 5.0       # narrowest practical width
+    NOTCH_WIDTH_MAX_HZ = 2000.0    # widest practical width
+    NOTCH_NEAREST_TOLERANCE_HZ = 2000.0   # for "find notch near click"
 
-    def remove_nearest_notch(self, abs_freq_hz: float):
+    def _find_nearest_notch_idx(self, abs_freq_hz: float,
+                                tolerance_hz: float | None = None
+                                ) -> int | None:
         if not self._notches:
-            return
+            return None
         idx = min(range(len(self._notches)),
-                  key=lambda i: abs(self._notches[i][0] - abs_freq_hz))
-        del self._notches[idx]
-        # BUGFIX 2026-04-24: was emitting `self.notches` (list[float]),
-        # which broke widget paint loops that unpack each entry as
-        # `for freq, q in self._notches:` — a float isn't iterable, so
-        # the paint call raised silently inside Qt and the spectrum
-        # just stopped drawing ANY notch markers. Visible symptom:
-        # "remove one and they ALL disappear." Emit the pair list
-        # shape everywhere else uses.
+                  key=lambda i: abs(self._notches[i].abs_freq_hz - abs_freq_hz))
+        tol = (tolerance_hz if tolerance_hz is not None
+               else self.NOTCH_NEAREST_TOLERANCE_HZ)
+        if abs(self._notches[idx].abs_freq_hz - abs_freq_hz) > tol:
+            return None
+        return idx
+
+    def set_notch_default_width_hz(self, width_hz: float):
+        """Change the width used for newly placed notches. Existing
+        notches keep their individual widths unless explicitly
+        adjusted via wheel/drag/menu."""
+        w = max(self.NOTCH_WIDTH_MIN_HZ,
+                min(self.NOTCH_WIDTH_MAX_HZ, float(width_hz)))
+        self._notch_default_width_hz = w
+        self.notch_default_width_changed.emit(w)
+
+    def add_notch(self, abs_freq_hz: float,
+                  width_hz: float | None = None,
+                  active: bool = True):
+        """Place a new notch. Width defaults to the current
+        notch_default_width_hz. Auto-enables the notch bank if it's
+        currently off, on the assumption that an operator placing a
+        notch wants to hear the result."""
+        w = width_hz if width_hz is not None else self._notch_default_width_hz
+        w = max(self.NOTCH_WIDTH_MIN_HZ, min(self.NOTCH_WIDTH_MAX_HZ, float(w)))
+        nf = self._make_notch_filter(abs_freq_hz, w)
+        if nf is None:
+            return
+        self._notches.append(Notch(
+            abs_freq_hz=float(abs_freq_hz), width_hz=w,
+            active=bool(active), filter=nf,
+        ))
+        if not self._notch_enabled:
+            self.set_notch_enabled(True)
         self.notches_changed.emit(self.notch_details)
 
-    def adjust_nearest_notch_q(self, abs_freq_hz: float, q_delta: float,
-                               tolerance_hz: float = 2000.0):
-        """Find the notch nearest `abs_freq_hz` (within tolerance) and
-        shift its Q by q_delta. Used for mouse-wheel width adjust."""
-        if not self._notches:
+    def remove_nearest_notch(self, abs_freq_hz: float):
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz=1e9)
+        if idx is None:
+            return
+        del self._notches[idx]
+        self.notches_changed.emit(self.notch_details)
+
+    def set_notch_width_at(self, abs_freq_hz: float, new_width_hz: float,
+                           tolerance_hz: float | None = None) -> bool:
+        """Find the notch nearest abs_freq_hz and rebuild it with a
+        new width. Used by mouse-wheel and drag gestures over an
+        existing notch. Returns True if a notch was matched + updated.
+
+        Rebuild-throttle: drag gestures fire many events per second.
+        Each filter rebuild zeroes the IIR state — repeated rebuilds
+        during a fast drag would prevent the filter from settling
+        and audibly leak the notched signal. Skip rebuilds where the
+        width changes by less than 4%."""
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
             return False
-        idx = min(range(len(self._notches)),
-                  key=lambda i: abs(self._notches[i][0] - abs_freq_hz))
-        freq, q, _ = self._notches[idx]
-        if abs(freq - abs_freq_hz) > tolerance_hz:
+        n = self._notches[idx]
+        w = max(self.NOTCH_WIDTH_MIN_HZ,
+                min(self.NOTCH_WIDTH_MAX_HZ, float(new_width_hz)))
+        if n.width_hz > 0 and abs(w - n.width_hz) / n.width_hz < 0.04:
             return False
-        new_q = max(2.0, min(500.0, q + q_delta))
-        nf = self._make_notch(freq, new_q)
-        if nf:
-            self._notches[idx] = (freq, new_q, nf)
-            self.notches_changed.emit(self.notch_details)
+        nf = self._make_notch_filter(n.abs_freq_hz, w)
+        if nf is None:
+            return False
+        self._notches[idx] = Notch(
+            abs_freq_hz=n.abs_freq_hz, width_hz=w,
+            active=n.active, filter=nf,
+        )
+        self.notches_changed.emit(self.notch_details)
         return True
+
+    def set_notch_active_at(self, abs_freq_hz: float, active: bool,
+                            tolerance_hz: float | None = None) -> bool:
+        """Toggle one notch active/inactive without removing it. The
+        DSP loop bypasses inactive notches; the spectrum overlay shows
+        them in a grey/desaturated color so the operator can A/B
+        whether the notch is helping."""
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        if n.active == bool(active):
+            return True
+        self._notches[idx] = Notch(
+            abs_freq_hz=n.abs_freq_hz, width_hz=n.width_hz,
+            active=bool(active), filter=n.filter,
+        )
+        self.notches_changed.emit(self.notch_details)
+        return True
+
+    def toggle_notch_active_at(self, abs_freq_hz: float,
+                               tolerance_hz: float | None = None) -> bool:
+        idx = self._find_nearest_notch_idx(abs_freq_hz, tolerance_hz)
+        if idx is None:
+            return False
+        n = self._notches[idx]
+        return self.set_notch_active_at(
+            n.abs_freq_hz, not n.active, tolerance_hz)
 
     def clear_notches(self):
         self._notches.clear()
@@ -1576,27 +1687,8 @@ class Radio(QObject):
         self.spot_activated.emit(best["call"], best["mode"], best["freq_hz"])
         return True
 
-    def set_notch_q_at(self, abs_freq_hz: float, new_q: float,
-                       tolerance_hz: float = 5000.0) -> bool:
-        """Set absolute Q for the notch nearest abs_freq_hz (within tolerance)."""
-        if not self._notches:
-            return False
-        idx = min(range(len(self._notches)),
-                  key=lambda i: abs(self._notches[i][0] - abs_freq_hz))
-        freq, current_q, _ = self._notches[idx]
-        if abs(freq - abs_freq_hz) > tolerance_hz:
-            return False
-        new_q = max(2.0, min(500.0, float(new_q)))
-        # Throttle: skip rebuilds if Q barely changed. Repeated rebuilds
-        # during mouse drag reset the biquad state to zero, hurting the
-        # filter's actual attenuation.
-        if current_q > 0 and abs(new_q - current_q) / current_q < 0.04:
-            return False
-        nf = self._make_notch(freq, new_q)
-        if nf:
-            self._notches[idx] = (freq, new_q, nf)
-            self.notches_changed.emit(self.notch_details)
-        return True
+    # Removed duplicate set_notch_q_at — superseded by
+    # set_notch_width_at (Hz-based parameter, dataclass model).
 
     def set_audio_output(self, output: str):
         if output == self._audio_output:
@@ -1743,8 +1835,9 @@ class Radio(QObject):
             del self._audio_buf[:block]
             try:
                 if self._notch_enabled:
-                    for _, _, nf in self._notches:
-                        chunk = nf.process(chunk)
+                    for n in self._notches:
+                        if n.active:
+                            chunk = n.filter.process(chunk)
                 audio = demod.process(chunk)
                 # NR sits between demod and AGC — it cleans up the
                 # recovered audio before AGC evaluates gain, so hiss
@@ -1951,20 +2044,37 @@ class Radio(QObject):
             print(f"demod init failed: {e}")
             self._demods = {}
 
-    def _make_notch(self, abs_freq_hz: float, q: float | None = None) -> NotchFilter | None:
-        # The demod pipeline runs at a fixed 48 kHz (decimation happens
-        # before notching) — so notch coefficients must always be designed
-        # for 48 kHz regardless of the RX sample rate. Using self._rate
-        # here produced coefficients for the pre-decimation rate and the
-        # notch did nothing on the actual audio path.
+    def _make_notch_filter(self, abs_freq_hz: float,
+                           width_hz: float) -> NotchFilter | None:
+        """Design one notch filter at the given sky frequency with the
+        given -3 dB bandwidth. The DSP pipeline runs at a fixed
+        48 kHz (decimation happens before notching) — coefficients
+        always designed for 48 kHz regardless of the RX sample rate.
+
+        Two regimes:
+        - **Near-DC** (offset < width/2 + 10 Hz): use the high-pass
+          DC-blocker mode of NotchFilter. iirnotch can't catch DC
+          because its center frequency must be > 0 — its bandwidth
+          collapses to zero as freq → 0. The high-pass kills the
+          carrier and matches the visible "kill region" of width Hz.
+        - **Off-DC**: standard iirnotch centered at the offset, with
+          bandwidth = width Hz. Right tool for FT8 tones, RTTY pairs,
+          heterodynes, etc.
+        """
         NOTCH_RATE = 48000
         offset = abs_freq_hz - self._freq_hz
         max_off = NOTCH_RATE / 2 - 100
         offset = max(-max_off, min(max_off, offset))
-        if q is None:
-            q = self._notch_q_default
+        eff_freq = abs(offset)
+        # If the visible notch extent (freq ± width/2) crosses DC,
+        # iirnotch can't model it accurately. Switch to the
+        # DC-blocker path so the actual filter shape matches the
+        # rectangle the operator sees on the spectrum.
         try:
-            return NotchFilter(NOTCH_RATE, max(abs(offset), 1.0), q=q)
+            if eff_freq < (width_hz * 0.5 + 10.0):
+                return NotchFilter(NOTCH_RATE, eff_freq, width_hz,
+                                   dc_blocker=True)
+            return NotchFilter(NOTCH_RATE, eff_freq, width_hz)
         except Exception as e:
             self.status_message.emit(f"Notch error: {e}", 3000)
             return None

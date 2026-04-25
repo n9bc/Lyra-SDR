@@ -137,16 +137,52 @@ class NotchFilter:
     """Stateful IIR notch — removes a narrow band of frequencies from
     complex I/Q before demod. Applied real-valued to I and Q separately
     so the notch is symmetric around DC (perfect for killing a carrier
-    or CW interference near baseband)."""
+    or CW interference near baseband).
 
-    def __init__(self, rate: int, freq_hz: float, q: float = 30.0):
+    Parameter is **width_hz** (notch -3 dB bandwidth in Hz), not Q.
+    Operators think in absolute width ("kill a 100 Hz wide chunk")
+    not in Q values; matches Thetis / ExpertSDR3 mental model.
+    Internally the iirnotch design uses Q = freq / width.
+
+    Two filter modes selected by `freq_hz` proximity to DC:
+
+    - **Off-DC** (default for any non-zero freq): scipy `iirnotch`.
+      Narrow band-stop centered on `freq_hz`, bandwidth = `width_hz`.
+      Right tool for off-DC heterodynes, FT8 tones, RTTY pairs.
+
+    - **DC blocker** (`dc_blocker=True`): butterworth high-pass with
+      corner at `width_hz / 2`. Used when the operator clicks at/near
+      VFO center (the WWV-on-carrier case) — iirnotch's bandwidth
+      = freq/Q collapses as freq approaches 0, so it can't catch DC.
+      The high-pass kills DC + everything below the corner
+      symmetrically on both sides of baseband.
+
+    Either way, the rendered "notch region" on the spectrum spans
+    `freq_hz ± width_hz/2`.
+    """
+
+    def __init__(self, rate: int, freq_hz: float, width_hz: float,
+                 dc_blocker: bool = False):
         if not _HAVE_SCIPY:
             raise RuntimeError("scipy required")
-        from scipy.signal import iirnotch
         self.rate = rate
         self.freq_hz = freq_hz
-        w0 = freq_hz / (rate / 2.0)
-        self.b, self.a = iirnotch(w0, q)
+        self.width_hz = width_hz
+        self.dc_blocker = dc_blocker
+        if dc_blocker:
+            from scipy.signal import butter
+            # High-pass corner at width/2 so the visible notch extent
+            # (freq ± width/2 → 0..width) matches what the operator
+            # sees on the spectrum overlay. 4th order: steep enough
+            # that the corner is well-defined without ringing.
+            corner = max(width_hz * 0.5, 5.0)
+            self.b, self.a = butter(4, corner, btype='high', fs=rate)
+        else:
+            from scipy.signal import iirnotch
+            # iirnotch parameter Q = center / -3dB-bandwidth.
+            q = max(freq_hz / max(width_hz, 0.5), 0.5)
+            w0 = freq_hz / (rate / 2.0)
+            self.b, self.a = iirnotch(w0, q)
         self.state_i = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float32)
         self.state_q = np.zeros(max(len(self.a), len(self.b)) - 1, dtype=np.float32)
 

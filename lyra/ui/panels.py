@@ -792,15 +792,18 @@ class DspPanel(GlassPanel):
         self.notch_info = QLabel("0 notches")
         self.notch_info.setMinimumWidth(120)
         self._notch_tooltip = (
-            "Notch Filter — manual per-frequency notches. Toggle\n"
-            "on/off via the NF button on the DSP row below.\n\n"
+            "Notch Filter — manual per-frequency notches.\n"
+            "Toggle on/off via the NF button on the DSP row below.\n\n"
             "On the spectrum or waterfall (NF must be ON):\n"
-            "  • Right-click          — menu (Add / Remove nearest /\n"
-            "                            Clear all / Default Q for\n"
-            "                            new notches / Disable)\n"
+            "  • Right-click          — menu (Add / Toggle this /\n"
+            "                            Remove nearest / Clear all /\n"
+            "                            Default width / Disable)\n"
             "  • Shift + right-click  — quick-remove nearest notch\n"
-            "  • Left-drag a notch    — adjust that notch's Q (width)\n"
-            "  • Wheel over a notch   — adjust that notch's Q (width)\n\n"
+            "  • Left-drag a notch    — adjust that notch's width\n"
+            "  • Wheel over a notch   — adjust that notch's width\n"
+            "                            (down = wider, up = narrower)\n\n"
+            "Counter format: '3 notches  [50, 80*, 200 Hz]  (1 off)'\n"
+            "  — widths in Hz, asterisk marks an inactive notch.\n\n"
             "When NF is OFF, right-click shows a single 'Enable Notch\n"
             "Filter' item — right-click stays reserved for other\n"
             "spectrum features until you turn NF on.")
@@ -810,15 +813,10 @@ class DspPanel(GlassPanel):
 
         self.content_layout().addLayout(h)
 
-        # NOTE: `q_slider` was removed from this row (it was a tiny
-        # orange slider labeled "default Q" whose purpose wasn't
-        # obvious — per-notch Q is already adjustable via left-drag /
-        # wheel-over after creation, so pre-setting a default Q is a
-        # power-user knob that belongs in a menu, not the front row).
-        # The radio.set_notch_q_default API is still there; it's now
-        # reachable via the spectrum/waterfall right-click menu's
-        # "Default Q for new notches ▸" submenu.
-        self.q_slider = None
+        # NOTE: there is no per-notch slider on the front panel.
+        # Per-notch width is adjusted via wheel/drag over the notch
+        # rectangle on the spectrum, and the default width for new
+        # notches is in the right-click menu's "Default width" submenu.
 
         # ── DSP button row (NB / BIN / NR / ANF / APF / NF) ─────────
         # Backends will land per-feature; for now these toggle stubs
@@ -950,11 +948,10 @@ class DspPanel(GlassPanel):
         # was removed to eliminate the confusing "two buttons light
         # together" feedback.
         radio.notch_enabled_changed.connect(self.dsp_btns["NF"].setChecked)
-        # notch_q_changed formerly drove a front-panel slider; the
-        # slider was removed (see DSP row notes). Keep no-op so future
-        # UI re-exposure (e.g. Settings DSP tab, or a menu readout) has
-        # a wiring point.
-        radio.notch_q_changed.connect(lambda _q: None)
+        # Default-width changes don't drive a front-panel slider
+        # (they used to in the old Q-slider era; that was removed).
+        # Kept no-op so future UI re-exposure has a wiring point.
+        radio.notch_default_width_changed.connect(lambda _w: None)
         radio.audio_output_changed.connect(
             lambda o: self.out_combo.setCurrentText(o) if self.out_combo.currentText() != o else None)
         # LNA gain + Volume feedback (previously lived in GainPanel)
@@ -1090,19 +1087,28 @@ class DspPanel(GlassPanel):
             "Left-click: toggle on/off.\n"
             "Right-click: change profile.")
 
-    def _on_notches_changed(self, pairs):
-        # pairs is list[(freq_hz, q)]. Compact counter only — gesture
-        # hints live on the Notch button's tooltip so the row stays
-        # tight. When there are active notches we append their Qs so
-        # the operator can verify at a glance what shapes are in play
-        # without having to hover each marker.
-        n = len(pairs)
-        q_text = ""
-        if pairs:
-            qs = [q for _, q in pairs]
-            q_text = f"  (Q={', '.join(f'{q:.0f}' for q in qs)})"
+    def _on_notches_changed(self, items):
+        # items is list[(freq_hz, width_hz, active)]. Compact counter
+        # only — gesture hints live on the NF button's tooltip so the
+        # row stays tight. Shows widths in Hz so the operator can
+        # verify shape at a glance. Inactive notches noted with a
+        # trailing asterisk so they're visible in the count.
+        n = len(items)
+        if not items:
+            self.notch_info.setText("0 notches")
+            return
+        widths = [
+            f"{int(round(w))}{'*' if not active else ''}"
+            for _, w, active in items
+        ]
+        n_active = sum(1 for _, _, a in items if a)
+        n_off = n - n_active
+        suffix = ""
+        if n_off:
+            suffix = f"  ({n_off} off)"
         self.notch_info.setText(
-            f"{n} notch{'es' if n != 1 else ''}{q_text}")
+            f"{n} notch{'es' if n != 1 else ''}  "
+            f"[{', '.join(widths)} Hz]{suffix}")
 
     def _open_dsp_settings(self):
         """Delegate to the MainWindow's Settings opener, jumping to the
@@ -1333,6 +1339,24 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
     menu.addAction(add_act)
 
     have_any = bool(radio.notch_details)
+
+    # If there's a notch near the click, expose per-notch toggle +
+    # remove. Lookup tolerance is generous so the operator doesn't
+    # need pixel-precise aim.
+    nearest_idx = radio._find_nearest_notch_idx(
+        float(freq_hz), tolerance_hz=2000.0)
+    if nearest_idx is not None:
+        nearest = radio._notches[nearest_idx]
+        toggle_label = ("Disable this notch" if nearest.active
+                        else "Enable this notch")
+        toggle_act = QAction(
+            f"{toggle_label}  ({nearest.abs_freq_hz/1e6:.4f} MHz, "
+            f"{int(round(nearest.width_hz))} Hz)", menu)
+        toggle_act.triggered.connect(
+            lambda _=False, f=nearest.abs_freq_hz:
+                radio.toggle_notch_active_at(f))
+        menu.addAction(toggle_act)
+
     rm_act = QAction("Remove nearest notch", menu)
     rm_act.setEnabled(have_any)
     rm_act.triggered.connect(
@@ -1345,30 +1369,32 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
     clr_act.triggered.connect(radio.clear_notches)
     menu.addAction(clr_act)
 
-    # Default-Q submenu. Formerly a front-panel slider (the mystery
-    # orange one); now a menu entry so the front row stays clean.
-    # The current default is shown with a trailing checkmark so the
-    # operator can see what "wider" or "narrower" is relative to.
+    # Default-width submenu (replaces the old default-Q one). Width
+    # is in Hz so operators don't need to mentally translate Q values
+    # — matches Thetis / ExpertSDR3's parameter choice. Presets
+    # cover common use cases from "narrow CW notch" up to "broadcast
+    # splatter blanket".
     menu.addSeparator()
-    q_menu = menu.addMenu("Default Q for new notches")
-    current_q = float(getattr(radio, "notch_q", 30.0))
-    for q_preset, descr in (
-        (10,  "very wide — rattly broadcast splatter"),
-        (30,  "default — general CW/carrier kill"),
-        (60,  "narrow — surgical on one carrier"),
-        (100, "very narrow — isolates a single tone"),
-        (200, "pinpoint — surgical beacon notch"),
+    w_menu = menu.addMenu("Default width for new notches")
+    current_w = float(getattr(radio, "notch_default_width_hz", 80.0))
+    for w_preset, descr in (
+        (20,   "very narrow — pinpoint single tone"),
+        (50,   "narrow — surgical CW carrier kill"),
+        (80,   "default — covers FT8 / FT4 (47 Hz spread)"),
+        (150,  "wide — RTTY pair, drifty CW"),
+        (300,  "very wide — broadband het, splatter"),
+        (600,  "blanket — segments of QRM"),
     ):
-        label = f"Q = {q_preset}   {descr}"
-        if abs(current_q - q_preset) < 0.5:
+        label = f"{w_preset:>3d} Hz   {descr}"
+        if abs(current_w - w_preset) < 0.5:
             label = "✓  " + label
         else:
             label = "    " + label
-        act = QAction(label, q_menu)
+        act = QAction(label, w_menu)
         act.triggered.connect(
-            lambda _checked=False, q=q_preset:
-                radio.set_notch_q_default(float(q)))
-        q_menu.addAction(act)
+            lambda _checked=False, w=w_preset:
+                radio.set_notch_default_width_hz(float(w)))
+        w_menu.addAction(act)
 
     # Turn-off action — convenient exit from notch mode back to
     # "right-click does nothing notch-related" state. Sits at the
@@ -1512,16 +1538,24 @@ class SpectrumPanel(GlassPanel):
         menu.exec(global_pos)
 
     def _on_wheel(self, freq_hz, delta_units):
-        # Multiplicative so one tick = noticeable change. Up = higher Q.
-        factor = 1.2 ** delta_units
-        # Fetch current Q of nearest and multiply
-        for f, q in self.radio.notch_details:
-            if abs(f - freq_hz) <= self.radio.rate / 8:
-                self.radio.set_notch_q_at(f, q * factor)
-                return
+        # Wheel over a notch adjusts its WIDTH multiplicatively.
+        # Down = wider, up = narrower (matches "scroll up to zoom in /
+        # narrow the focus"). 1.15x per tick so each click is visible
+        # but not jumpy. Looks up the nearest notch via Radio so we
+        # don't depend on the panel knowing the data shape.
+        factor = (1 / 1.15) ** delta_units
+        nearest_idx = self.radio._find_nearest_notch_idx(
+            float(freq_hz), tolerance_hz=self.radio.rate / 8)
+        if nearest_idx is None:
+            return
+        n = self.radio._notches[nearest_idx]
+        self.radio.set_notch_width_at(n.abs_freq_hz, n.width_hz * factor)
 
-    def _on_notch_q_drag(self, freq_hz, new_q):
-        self.radio.set_notch_q_at(freq_hz, new_q)
+    def _on_notch_q_drag(self, freq_hz, new_value):
+        # Signal name is historical ("q_drag"); payload is now WIDTH
+        # in Hz. Spectrum widget computes the proposed width from
+        # vertical drag distance and emits it directly.
+        self.radio.set_notch_width_at(freq_hz, new_value)
 
 
 # ── Band selector ──────────────────────────────────────────────────────
