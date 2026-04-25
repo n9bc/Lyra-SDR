@@ -111,6 +111,15 @@ class MainWindow(QMainWindow):
 
         self._load_settings()
 
+        # OpenGL upsell — fire shortly after the main window is fully
+        # painted so the modal dialog reliably appears on top instead
+        # of being parented to a half-shown window (which on Windows
+        # can occasionally hide the dialog behind the main one). 600ms
+        # is "human-perceptible delay-free" but lets Qt finish window
+        # construction + first paint pass.
+        from PySide6.QtCore import QTimer as _QTimer
+        _QTimer.singleShot(600, self._maybe_show_opengl_nag)
+
     # ── Layout ───────────────────────────────────────────────────────
     def _build_layout(self):
         # Central widget: spectrum + waterfall in a vertical splitter so
@@ -235,9 +244,23 @@ class MainWindow(QMainWindow):
             # Each dock provides a pre-wired QAction to toggle visibility
             view_menu.addAction(dock.toggleViewAction())
         view_menu.addSeparator()
+        save_layout = QAction("Save current layout as my default", self)
+        save_layout.setToolTip(
+            "Capture the current arrangement (panel positions, sizes, "
+            "splitter widths) and use it as the new default. 'Reset Panel "
+            "Layout' below will then restore to THIS state instead of the "
+            "factory layout.")
+        save_layout.triggered.connect(self._save_current_as_default_layout)
+        view_menu.addAction(save_layout)
         reset = QAction("Reset Panel Layout", self)
         reset.triggered.connect(self._reset_layout)
         view_menu.addAction(reset)
+        clear_default = QAction("Forget saved layout (revert to factory)", self)
+        clear_default.setToolTip(
+            "Discard the user-saved default layout. Reset Panel Layout "
+            "will once again restore to the factory arrangement.")
+        clear_default.triggered.connect(self._clear_user_default_layout)
+        view_menu.addAction(clear_default)
 
         # Help menu — user guide + keyboard-shortcuts shortcut topic
         # + about. F1 opens the guide from anywhere.
@@ -255,63 +278,116 @@ class MainWindow(QMainWindow):
             lambda: self.show_help("troubleshooting"))
         help_menu.addAction(troubleshoot_act)
 
-    def _build_toolbar(self):
-        """Main toolbar: Start/Stop + Settings + Layout commands.
+        help_menu.addSeparator()
+        # Diagnostics — HL2 telemetry probe. Captures live C&C bytes
+        # for a few seconds so we can verify which C0 address carries
+        # temperature / supply on the operator's specific HL2 firmware
+        # without guessing through public docs.
+        telem_probe_act = QAction("HL2 &Telemetry Probe…", self)
+        telem_probe_act.setToolTip(
+            "Capture a few seconds of HL2 telemetry bytes and show "
+            "which C0 addresses carry which AIN values. Use this if "
+            "the toolbar T/V readouts look wrong.")
+        telem_probe_act.triggered.connect(self._open_telem_probe)
+        help_menu.addAction(telem_probe_act)
 
-        These are the always-visible "rig power" controls that need to
-        be one click away. IP selection, TCI setup, hardware options,
-        etc. all live in Settings now.
+        # Test entry point for the OpenGL upsell dialog. Mostly useful
+        # to operators who already enabled OpenGL but want to see what
+        # the prompt looks like (otherwise the suppression rule hides
+        # it from them forever). Also handy for QA / screenshots.
+        opengl_dialog_act = QAction("Show OpenGL Suggestion Dialog", self)
+        opengl_dialog_act.setToolTip(
+            "Manually open the OpenGL graphics-backend suggestion dialog. "
+            "Bypasses the 'don't show again' and 'OpenGL already active' "
+            "silencing rules so you can see what new operators will see "
+            "on first launch.")
+        opengl_dialog_act.triggered.connect(
+            lambda: self._show_opengl_dialog(force=True))
+        help_menu.addAction(opengl_dialog_act)
+
+    def _build_toolbar(self):
+        """Main toolbar — explicit left-to-right order:
+
+            Start  ●Streaming  ◌TCI Ready  ⚙Settings  Reset Panel Layout
+            [dock toggles — Tuning / Mode+Filter / View / Band / Meters / DSP+Audio]
+            ── spacer ── [ADC pk/rms]
+            ── spacer ── [Local clock] [UTC clock]   (centered)
+            ── spacer ── [HL2 T/V] [CPU%]
+
+        Three Expanding spacers between ADC, Clocks, and HL2/CPU
+        distribute them evenly so the clocks land in the visual
+        center of the bar and the HL2/CPU cluster sits on the right.
         """
+        from PySide6.QtWidgets import QLabel, QWidget, QSizePolicy
+        from PySide6.QtCore import QTimer
+
         tb = QToolBar("Main", self)
         tb.setObjectName("main_toolbar")
         tb.setMovable(True)
         tb.setIconSize(tb.iconSize())  # use platform default
 
-        # Logo now lives on the Tuning panel between RX1 and RX2 —
-        # much more visible there + room for the future RX2 + TX split
-        # readouts. Window icon still applies (title bar / taskbar).
-
-        # Start / Stop — checkable so the button visibly reflects state
+        # ── 1. Start / Stop ────────────────────────────────────────
         self.start_action = QAction("▶  Start", self)
         self.start_action.setCheckable(True)
         self.start_action.setToolTip("Start/stop the HL2 stream")
         self.start_action.toggled.connect(self._on_start_toggled)
         tb.addAction(self.start_action)
 
-        # Connection status dot (color-coded label)
-        from PySide6.QtWidgets import QLabel
+        # ── 2. Streaming status dot ────────────────────────────────
         self.status_dot = QLabel("  ●  not streaming  ")
         self.status_dot.setStyleSheet("color: #8a9aac; font-weight: 600;")
         tb.addWidget(self.status_dot)
 
-        # TCI status indicator — replaces the former TCI dock panel.
-        # Shows at a glance whether the TCI server is running and how
-        # many clients are connected. Click to open Settings → Network/TCI.
-        # (Plain QLabel with a mouse-click hook, so it can live inline
-        # with the toolbar widgets instead of adding a full QAction.)
+        # ── 3. TCI Ready indicator ─────────────────────────────────
+        # Replaces the former TCI dock panel — shows server state +
+        # client count at a glance. Click to open Network settings.
         self.tci_indicator = QLabel("  ◌  TCI off  ")
         self.tci_indicator.setStyleSheet(
             "color: #6a7a8c; font-weight: 600; padding: 0 4px;")
         self.tci_indicator.setToolTip(
             "TCI server status. Click to open Network/TCI settings.")
         self.tci_indicator.setCursor(Qt.PointingHandCursor)
-        # Lambda wrapper around mousePressEvent to route the click
         self.tci_indicator.mousePressEvent = (
             lambda ev: self._open_settings(tab="Network"))
         tb.addWidget(self.tci_indicator)
-
-        # Wire to the TCI server's state signals
         server = self.pnl_tci.server
         server.running_changed.connect(self._update_tci_indicator)
         server.client_count_changed.connect(self._update_tci_indicator)
         self._update_tci_indicator()
 
-        # ── ADC peak + RMS indicator ───────────────────────────────
-        # Dual readout: peak shows clipping margin (headroom), RMS
-        # shows signal-energy level (predictable under LNA gain
-        # changes, useful for linearity diagnostics). On a noise
-        # floor, typical peak/RMS crest factor is ~10-12 dB.
-        # Fed by radio.lna_peak_dbfs + lna_rms_dbfs at ~4 Hz.
+        tb.addSeparator()
+
+        # ── 4. Settings ────────────────────────────────────────────
+        settings_action = QAction("⚙  Settings…", self)
+        settings_action.setToolTip("Radio, Network/TCI, Hardware, Audio, DSP…")
+        settings_action.triggered.connect(self._open_settings)
+        tb.addAction(settings_action)
+
+        # ── 5. Reset Panel Layout ──────────────────────────────────
+        reset = QAction("Reset Panel Layout", self)
+        reset.setToolTip("Restore the default panel arrangement")
+        reset.triggered.connect(self._reset_layout)
+        tb.addAction(reset)
+
+        tb.addSeparator()
+
+        # ── 6. Dock toggle buttons (Tuning / Mode+Filter / View /
+        #     Band / Meters / DSP+Audio) ────────────────────────────
+        for dock_name, dock in self.docks.items():
+            tb.addAction(dock.toggleViewAction())
+
+        # ── Small fixed gap — keeps ADC visually attached to the
+        #     left cluster (just a breath of padding after DSP+Audio)
+        #     instead of floating off into the middle of the bar.
+        gap_pre_adc = QWidget()
+        gap_pre_adc.setFixedWidth(14)
+        tb.addWidget(gap_pre_adc)
+
+        # ── 7. ADC peak + RMS indicator ────────────────────────────
+        # Live RX-chain headroom: PEAK for clipping margin, RMS for
+        # signal-energy / linearity diagnostics. Sits left-of-center
+        # so it's visually paired with the radio-state cluster on the
+        # left rather than the host-machine cluster on the right.
         self.adc_peak_indicator = QLabel("  ADC pk --  rms --  dBFS  ")
         self.adc_peak_indicator.setStyleSheet(
             "color: #6a7a8c; font-family: Consolas, monospace; "
@@ -336,23 +412,185 @@ class MainWindow(QMainWindow):
         self.radio.lna_peak_dbfs.connect(self._update_adc_peak)
         self.radio.lna_rms_dbfs.connect(self._update_adc_rms)
 
-        tb.addSeparator()
+        # ── Spacer #2 — pushes clocks toward visual center ────────
+        spacer2 = QWidget()
+        spacer2.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer2)
 
-        settings_action = QAction("⚙  Settings…", self)
-        settings_action.setToolTip("Radio, Network/TCI, Hardware, Audio, DSP…")
-        settings_action.triggered.connect(self._open_settings)
-        tb.addAction(settings_action)
+        # ── 8. Clocks (local + UTC) ────────────────────────────────
+        # Sized ~2.4× the surrounding toolbar text so the operator can
+        # read the time across the room without leaning in.
+        self.clock_local = QLabel("--:--:--")
+        self.clock_local.setStyleSheet(
+            "color: #ffd54f; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 22px; padding: 0 8px;")
+        self.clock_local.setToolTip("PC local time (HH:MM:SS)")
+        tb.addWidget(self.clock_local)
+        self.clock_utc = QLabel("--:--:--Z")
+        self.clock_utc.setStyleSheet(
+            "color: #80d8ff; font-family: Consolas, monospace; "
+            "font-weight: 700; font-size: 22px; padding: 0 8px;")
+        self.clock_utc.setToolTip("UTC time (HH:MM:SSZ) — always Zulu")
+        tb.addWidget(self.clock_utc)
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(1000)
+        self._clock_timer.timeout.connect(self._tick_clocks)
+        self._clock_timer.start()
+        self._tick_clocks()
 
-        tb.addSeparator()
+        # ── Spacer #3 — equal stretch with spacer2 so the clocks
+        #     land at the visual midpoint between ADC and HL2/CPU.
+        spacer3 = QWidget()
+        spacer3.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        tb.addWidget(spacer3)
 
-        reset = QAction("Reset Panel Layout", self)
-        reset.setToolTip("Restore the default panel arrangement")
-        reset.triggered.connect(self._reset_layout)
-        tb.addAction(reset)
+        # ── 9. HL2 hardware telemetry (temperature + supply V) ────
+        self.hl2_telem_label = QLabel("HL2  T --°C   V --.- V")
+        self.hl2_telem_label.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace; "
+            "font-weight: 700; padding: 0 6px;")
+        self.hl2_telem_label.setToolTip(
+            "HL2 hardware telemetry (read from EP6 stream).\n\n"
+            "T — AD9866 on-die temperature sensor (°C). Idle ~45-55,\n"
+            "    warm ~60-70, hot >75 — check airflow if you see\n"
+            "    sustained readings above ~80 °C.\n\n"
+            "V — 12 V supply rail measured through the on-board\n"
+            "    divider. Should sit within 11.5-13.0 V on a healthy\n"
+            "    PSU; sagging below 11 V points to a weak supply or\n"
+            "    a long thin power lead.\n\n"
+            "Reads '--' until the stream is running and a few EP6\n"
+            "frames have arrived — the radio rotates which telemetry\n"
+            "register it reports each frame.")
+        tb.addWidget(self.hl2_telem_label)
+        self.radio.hl2_telemetry_changed.connect(self._update_hl2_telemetry)
 
-        tb.addSeparator()
-        for dock_name, dock in self.docks.items():
-            tb.addAction(dock.toggleViewAction())
+        # ── 10. CPU usage indicator (whole-system %, matches Task
+        #     Manager's "CPU" column for this process) ──────────────
+        # psutil.Process.cpu_percent() returns PER-CORE normalized
+        # (so a single-thread 100% load on 1 of 8 cores reads as
+        # 100%). Task Manager shows total-system % (12.5% in that
+        # example), so we divide by core count to match what the
+        # operator sees in Task Manager. Without this divisor the
+        # Lyra reading was inflated by a factor of cpu_count.
+        self.cpu_label = QLabel("CPU --%")
+        self.cpu_label.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace; "
+            "font-weight: 700; padding: 0 6px;")
+        self.cpu_label.setToolTip(
+            "Lyra process CPU usage (% of total system CPU,\n"
+            "matches Task Manager's per-process column).\n\n"
+            "Sustained values above ~15-25% on a modern multi-core\n"
+            "PC suggest an FFT size / sample-rate combination that's\n"
+            "heavier than your CPU comfortably handles.")
+        tb.addWidget(self.cpu_label)
+        self._cpu_proc = None
+        self._cpu_count = 1
+        try:
+            import psutil
+            self._cpu_proc = psutil.Process()
+            # Prime the CPU sampler — first call returns 0.0 because
+            # percent() is delta-since-last.
+            self._cpu_proc.cpu_percent(interval=None)
+            # Logical core count, including SMT/hyperthreaded cores
+            # (matches Windows Task Manager's denominator).
+            self._cpu_count = max(1, psutil.cpu_count(logical=True) or 1)
+        except Exception:
+            self._cpu_proc = None
+        self._cpu_timer = QTimer(self)
+        self._cpu_timer.setInterval(1000)
+        self._cpu_timer.timeout.connect(self._tick_cpu)
+        self._cpu_timer.start()
+
+        # ── 11. GPU usage indicator ────────────────────────────────
+        # System-wide GPU utilisation %. Useful for diagnosing whether
+        # window-compositor / Lyra paint workload is putting load on
+        # the GPU. Lyra's spectrum/waterfall use QPainter (CPU paint),
+        # so Lyra itself contributes little to GPU; this readout is
+        # mainly for spotting external GPU load competing with the
+        # PC's general responsiveness.
+        #
+        # Tries pynvml first (real NVIDIA per-GPU% with no extra
+        # process spawn). Falls back to "n/a" if the lib isn't
+        # installed or no NVIDIA GPU is present — graceful, the rest
+        # of the toolbar keeps working unchanged.
+        self.gpu_label = QLabel("GPU --%")
+        self.gpu_label.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace; "
+            "font-weight: 700; padding: 0 6px;")
+        self.gpu_label.setToolTip(
+            "GPU utilization (system-wide %).\n\n"
+            "Lyra's spectrum/waterfall paint with QPainter (CPU),\n"
+            "so Lyra itself contributes little to GPU load — but\n"
+            "this readout is useful for spotting external apps\n"
+            "competing for GPU resources, or for confirming that\n"
+            "the OS compositor isn't the bottleneck on slower PCs.\n\n"
+            "Reads NVIDIA GPUs via the NVML library; AMD / Intel /\n"
+            "no NVIDIA = 'n/a'. Install nvidia-ml-py for the readout.")
+        tb.addWidget(self.gpu_label)
+        # GPU monitor — try two paths in order of preference:
+        #
+        # 1. NVML (NVIDIA only)  — precise per-card utilisation; works
+        #    on any OS where the NVIDIA driver is installed. Lower
+        #    overhead than the PDH path.
+        # 2. Windows Performance Counters (any vendor)  — uses Win10+'s
+        #    `\GPU Engine(*)\Utilization Percentage` counter set, which
+        #    Microsoft populates from WDDM regardless of the GPU
+        #    vendor. So AMD / Intel iGPU / NVIDIA (without NVML) all
+        #    work via this path.
+        # 3. None of the above — label stays "GPU n/a" and the rest
+        #    of the toolbar is unaffected.
+        self._gpu_mode = None        # "nvml" | "pdh" | None
+        self._gpu_handle = None      # nvml device handle if mode == nvml
+        self._gpu_nvml = None
+        self._gpu_pdh_query = None   # PDH query handle if mode == pdh
+        self._gpu_pdh_counter = None
+        # Try NVML first.
+        try:
+            # The PyPI package is `nvidia-ml-py` (modern, non-deprecated).
+            # It exposes its module as `pynvml` for legacy compatibility,
+            # which triggers a FutureWarning from the older `pynvml`
+            # deprecation shim if both are installed. Suppress that
+            # warning scoped to this import only.
+            import warnings
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=FutureWarning)
+                import pynvml as _nvml
+            _nvml.nvmlInit()
+            if _nvml.nvmlDeviceGetCount() > 0:
+                self._gpu_handle = _nvml.nvmlDeviceGetHandleByIndex(0)
+                self._gpu_nvml = _nvml
+                self._gpu_mode = "nvml"
+        except Exception:
+            pass
+        # If NVML didn't bind, try Windows PDH (works for any vendor).
+        if self._gpu_mode is None:
+            try:
+                import win32pdh
+                self._gpu_pdh_module = win32pdh
+                self._gpu_pdh_query = win32pdh.OpenQuery()
+                self._gpu_pdh_counter = win32pdh.AddCounter(
+                    self._gpu_pdh_query,
+                    r"\GPU Engine(*)\Utilization Percentage")
+                # PDH counters require two samples to compute a delta;
+                # prime the query so the first _tick_gpu reads valid
+                # data instead of zeroes.
+                win32pdh.CollectQueryData(self._gpu_pdh_query)
+                self._gpu_mode = "pdh"
+            except Exception:
+                # No pywin32, no Win10+ GPU counters, or PDH refused
+                # the wildcard — silently fall back to "n/a".
+                self._gpu_mode = None
+        self._gpu_timer = QTimer(self)
+        self._gpu_timer.setInterval(1000)
+        self._gpu_timer.timeout.connect(self._tick_gpu)
+        self._gpu_timer.start()
+
+        # ── Small fixed right margin — keeps HL2/CPU/GPU breathing
+        #     room from the right edge of the toolbar instead of
+        #     being jammed against the window border.
+        gap_right = QWidget()
+        gap_right.setFixedWidth(20)
+        tb.addWidget(gap_right)
 
         self.addToolBar(Qt.TopToolBarArea, tb)
 
@@ -451,6 +689,226 @@ class MainWindow(QMainWindow):
             f"color: {color}; font-family: Consolas, monospace; "
             "font-weight: 700; padding: 0 4px;")
 
+    # ── Banner clocks / telemetry / CPU handlers ─────────────────────
+    def _tick_clocks(self):
+        """1 Hz tick — repaint local + UTC clocks. We re-read the
+        system clock each tick (rather than incrementing a counter) so
+        the labels stay correct across DST boundaries, sleep/resume,
+        and manual time changes."""
+        from datetime import datetime, timezone
+        now_local = datetime.now()
+        now_utc = datetime.now(timezone.utc)
+        self.clock_local.setText(now_local.strftime("%H:%M:%S"))
+        self.clock_utc.setText(now_utc.strftime("%H:%M:%SZ"))
+
+    def _update_hl2_telemetry(self, payload: dict):
+        """Radio.hl2_telemetry_changed → update banner label.
+        NaN fields render as 'n/a' so the operator can tell when a
+        field isn't present in their HL2 firmware's telemetry stream
+        (some firmware revisions don't populate the supply slot, for
+        example) vs. an actual zero reading."""
+        import math
+        t = payload.get("temp_c", float("nan"))
+        v = payload.get("supply_v", float("nan"))
+        t_str = f"{t:4.1f}°C" if not math.isnan(t) else " n/a "
+        v_str = f"{v:4.1f} V" if not math.isnan(v) else " n/a "
+        self.hl2_telem_label.setText(f"HL2  T {t_str}   V {v_str}")
+
+    def _tick_cpu(self):
+        """1 Hz tick — refresh the CPU% label as a fraction of TOTAL
+        system CPU (matches Task Manager's per-process column).
+
+        psutil.Process.cpu_percent() returns PER-CORE normalized: a
+        single-thread process pegged on one of N logical cores reads
+        as 100% from that call. Task Manager normalizes against total
+        system capacity (so the same process reads as 100/N %). Dividing
+        by the logical core count makes Lyra's banner match what the
+        operator sees in Task Manager — without the divisor, the Lyra
+        reading was inflated by a factor equal to the core count
+        (e.g. 8× too high on an 8-thread CPU).
+        """
+        if self._cpu_proc is None:
+            return
+        try:
+            raw = self._cpu_proc.cpu_percent(interval=None)
+        except Exception:
+            return
+        pct = raw / self._cpu_count
+        self.cpu_label.setText(f"CPU {pct:4.1f}%")
+        # Color thresholds tightened to match the new (smaller)
+        # number range: <8% green, <16% yellow, <30% orange, ≥30% red.
+        # On an 8-core box, 30% total ≈ 240% raw — that's well into
+        # "DSP load is starting to bite" territory.
+        if pct >= 30:
+            color = "#ff4040"
+        elif pct >= 16:
+            color = "#ff8c3a"
+        elif pct >= 8:
+            color = "#ffd54f"
+        else:
+            color = "#39ff14"
+        self.cpu_label.setStyleSheet(
+            f"color: {color}; font-family: Consolas, monospace; "
+            "font-weight: 700; padding: 0 6px;")
+
+    def _tick_gpu(self):
+        """1 Hz tick — refresh the GPU% label.
+
+        Two backend paths (see _build_toolbar):
+        - "nvml" : NVIDIA per-card utilisation via NVML
+        - "pdh"  : Windows Performance Counters wildcard query that
+                   sums per-process per-engine utilisation across the
+                   whole system. Vendor-agnostic.
+
+        PDH values can briefly exceed 100% because they sum 3D + Copy
+        + Compute + Video engines — those engines run in parallel on
+        modern GPUs, so a hot frame can saturate two engines at once.
+        We clamp the displayed value at 100% (the conceptual max for a
+        "busy GPU" indicator) but the raw could be higher."""
+        if self._gpu_mode is None:
+            self.gpu_label.setText("GPU  n/a ")
+            return
+        try:
+            if self._gpu_mode == "nvml":
+                rates = self._gpu_nvml.nvmlDeviceGetUtilizationRates(
+                    self._gpu_handle)
+                pct = float(rates.gpu)
+            else:   # pdh
+                pdh = self._gpu_pdh_module
+                pdh.CollectQueryData(self._gpu_pdh_query)
+                values = pdh.GetFormattedCounterArray(
+                    self._gpu_pdh_counter, pdh.PDH_FMT_DOUBLE)
+                # values is a dict {instance_name: float}; sum gives
+                # total system GPU activity across all engines + procs.
+                pct = float(sum(values.values()))
+                # Clamp display: the raw can exceed 100 when multiple
+                # engines saturate simultaneously, but for a single
+                # "busy GPU" readout 100% is the visual ceiling.
+                if pct > 100.0:
+                    pct = 100.0
+        except Exception:
+            self.gpu_label.setText("GPU  n/a ")
+            return
+        self.gpu_label.setText(f"GPU {pct:4.1f}%")
+        # Color thresholds matched to CPU label so a glance at both
+        # gives a consistent "load = green/yellow/orange/red" reading.
+        if pct >= 75:
+            color = "#ff4040"
+        elif pct >= 50:
+            color = "#ff8c3a"
+        elif pct >= 25:
+            color = "#ffd54f"
+        else:
+            color = "#39ff14"
+        self.gpu_label.setStyleSheet(
+            f"color: {color}; font-family: Consolas, monospace; "
+            "font-weight: 700; padding: 0 6px;")
+
+    def _maybe_show_opengl_nag(self):
+        """One-time prompt suggesting the operator switch to the
+        OpenGL backend when they're currently using software paint.
+
+        Triggered once after the main window first becomes visible.
+        Suppressed when the operator has either:
+        - Selected OpenGL in Visuals settings (ACTIVE_BACKEND ==
+          opengl on next launch), or
+        - Checked "Don't show this again" in the dialog.
+
+        Triggered manually via the test entry point
+        Help → "Test OpenGL Suggestion Dialog" so operators can see
+        what the dialog looks like without forcibly downgrading their
+        backend setting.
+        """
+        from lyra.ui.gfx import ACTIVE_BACKEND, BACKEND_SOFTWARE
+        if ACTIVE_BACKEND != BACKEND_SOFTWARE:
+            return
+        if self._settings.value("ui/opengl_nag_dismissed", False, type=bool):
+            return
+        self._show_opengl_dialog(force=False)
+
+    def _show_opengl_dialog(self, force: bool):
+        """Render the OpenGL upsell dialog. Custom QDialog rather than
+        QMessageBox so the 'Don't show again' checkbox is part of the
+        normal layout flow (the QMessageBox checkBox API renders it in
+        an awkward spot under the buttons that operators routinely miss).
+
+        `force` = True bypasses the silencing rules — used by the
+        Help-menu test entry point so operators can inspect the dialog
+        even when they've already selected OpenGL or dismissed it.
+        """
+        from PySide6.QtWidgets import (
+            QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+            QCheckBox,
+        )
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Lyra — graphics backend")
+        dlg.setMinimumWidth(520)
+
+        v = QVBoxLayout(dlg)
+
+        title = QLabel("<b>Lyra is using software (CPU) rendering.</b>")
+        title.setStyleSheet("font-size: 14px; padding-bottom: 6px;")
+        v.addWidget(title)
+
+        body = QLabel(
+            "Switching to the OpenGL backend offloads spectrum and "
+            "waterfall painting to your GPU, which usually means:"
+            "<br><br>"
+            "&nbsp;&nbsp;• Smoother resize / fullscreen transitions<br>"
+            "&nbsp;&nbsp;• Lower CPU% on the toolbar<br>"
+            "&nbsp;&nbsp;• Less audio stutter under heavy DSP load"
+            "<br><br>"
+            "It works on essentially every GPU from the last 15 years "
+            "and falls back to software automatically if it can't "
+            "initialise."
+            "<br><br>"
+            "<b>Open Visuals settings now to switch?</b><br>"
+            "<span style='color:#8a9aac'>(A restart is required after "
+            "changing the backend.)</span>"
+        )
+        body.setTextFormat(Qt.RichText)
+        body.setWordWrap(True)
+        v.addWidget(body)
+
+        # Checkbox sits inside the dialog body, ABOVE the buttons,
+        # where the operator will actually see it.
+        dont_show = QCheckBox("Don't show this again")
+        dont_show.setStyleSheet("padding-top: 10px;")
+        v.addWidget(dont_show)
+
+        # Buttons row
+        h = QHBoxLayout()
+        h.addStretch(1)
+        later_btn = QPushButton("Maybe Later")
+        later_btn.clicked.connect(dlg.reject)
+        h.addWidget(later_btn)
+        open_btn = QPushButton("Open Visuals Settings")
+        open_btn.setDefault(True)
+        open_btn.clicked.connect(dlg.accept)
+        h.addWidget(open_btn)
+        v.addLayout(h)
+
+        result = dlg.exec()
+
+        # Persist dismissal independent of which button was pressed —
+        # both buttons close the dialog, the checkbox is the silencer.
+        # The `force` path also persists, so an operator using the test
+        # entry point can use it to flip the silencer on/off without
+        # editing QSettings by hand.
+        self._settings.setValue(
+            "ui/opengl_nag_dismissed", bool(dont_show.isChecked()))
+
+        if result == QDialog.Accepted:
+            self._open_settings(tab="Visuals")
+
+    def _open_telem_probe(self):
+        """Help → HL2 Telemetry Probe. Opens the diagnostic dialog
+        that captures live C&C bytes and shows per-address summaries
+        so we can verify the correct telemetry mapping for this HL2
+        firmware without guessing through public docs."""
+        from .telem_probe import TelemetryProbeDialog
+        TelemetryProbeDialog(self.radio, parent=self).exec()
+
     def _open_settings(self, tab: str | None = None):
         dlg = SettingsDialog(self.radio, self.pnl_tci.server, parent=self)
         if tab:
@@ -534,14 +992,39 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(1500, lambda: widget.setStyleSheet(prior))
 
     def _reset_layout(self):
-        """Restore the default arrangement (handy if panels end up in
-        weird places after a docking experiment)."""
-        # Remove every dock from its current position, then rebuild.
+        """Restore the default arrangement.
+
+        Two-tier default:
+        - If the operator has saved a personal default via
+          'Save current layout as my default', restore THAT.
+        - Otherwise restore the factory layout (Tuning + Mode + View
+          on top row, Band + Meters split, DSP at bottom).
+
+        This way 'Reset Panel Layout' is "go back to known good"
+        regardless of whether the operator's "known good" matches
+        the factory or their own customization.
+        """
+        user_state = self._settings.value("user_default_dock_state")
+        user_split = self._settings.value("user_default_center_split")
+        if user_state:
+            try:
+                self.restoreState(user_state)
+                if user_split:
+                    self.center_splitter.restoreState(user_split)
+                for dock in self.docks.values():
+                    dock.setVisible(True)
+                return
+            except Exception:
+                # Fall through to factory layout if the saved state
+                # is somehow corrupt (binary format change between
+                # Qt versions, etc.)
+                pass
+        # Factory layout — Remove every dock from its current
+        # position, then rebuild.
         for dock in self.docks.values():
             self.removeDockWidget(dock)
             dock.setFloating(False)
             dock.setVisible(True)
-        # Re-apply default layout (matches _build_layout)
         self.addDockWidget(Qt.TopDockWidgetArea, self.docks["tuning"])
         self.splitDockWidget(self.docks["tuning"],
                              self.docks["mode"], Qt.Horizontal)
@@ -554,6 +1037,40 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.docks["dsp"])
         for dock in self.docks.values():
             dock.setVisible(True)
+
+    def _save_current_as_default_layout(self):
+        """Capture the current dock state + center splitter widths
+        into QSettings under user_default_* keys. Future
+        'Reset Panel Layout' calls will restore to THIS state."""
+        self._settings.setValue("user_default_dock_state", self.saveState())
+        self._settings.setValue(
+            "user_default_center_split",
+            self.center_splitter.saveState())
+        self._settings.sync()
+        # Toast in the status bar so the operator sees it took effect
+        if hasattr(self, "status_dot"):
+            # Reuse the streaming dot's transient-message channel via
+            # the radio if available, else just a print fallback.
+            pass
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Default layout saved",
+            "Current panel arrangement saved as your default.\n\n"
+            "'Reset Panel Layout' (View menu / toolbar) will now\n"
+            "restore to THIS state instead of the factory layout.")
+
+    def _clear_user_default_layout(self):
+        """Forget the user-saved default. Reset Panel Layout falls
+        back to the hardcoded factory arrangement."""
+        self._settings.remove("user_default_dock_state")
+        self._settings.remove("user_default_center_split")
+        self._settings.sync()
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.information(
+            self, "Saved layout discarded",
+            "Your saved default layout has been removed.\n\n"
+            "'Reset Panel Layout' will now restore to the factory\n"
+            "arrangement (Tuning + Mode + View on top, etc).")
 
     # ── Persistence ──────────────────────────────────────────────────
     def _migrate_legacy_settings(self):

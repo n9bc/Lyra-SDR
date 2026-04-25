@@ -53,6 +53,8 @@ class SpectrumWidget(_PaintedWidget):
     NOTCH_HIT_PX = 14
     SPOT_HIT_PX = 8
     PASSBAND_HIT_PX = 6         # clickable halo around each dashed edge
+    DRAG_TUNE_THRESHOLD_PX = 5  # cursor must move > this to treat
+                                # left-press as pan instead of click
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -114,6 +116,13 @@ class SpectrumWidget(_PaintedWidget):
         self._show_band_segments: bool = True
         self._show_band_landmarks: bool = True
         self._show_band_edge_warn: bool = True
+        # Vertical pixels at the top of the widget reserved by the
+        # band-plan overlay (segment strip + landmark triangles). Set
+        # by paintEvent each frame so the spot packer below knows where
+        # it can start placing rows without colliding into the colored
+        # mode bar or the FT8 / FT4 / WSPR triangles. Default 0 means
+        # "no band-plan overlay active, spots may use full vertical".
+        self._band_plan_reserved_px: int = 0
         self._drag_notch: tuple[float, float] | None = None
         self._drag_start_y: int = 0
         # Active passband-edge drag: None, "lo", or "hi"
@@ -123,6 +132,15 @@ class SpectrumWidget(_PaintedWidget):
         # "min" / "max" / "pan". Set when user press-and-holds in
         # the rightmost ~50 px strip (the dB labels area).
         self._drag_db_scale: tuple[int, float, float, str] | None = None
+        # Click-vs-drag-tune state. Set on left-press over empty
+        # spectrum (no notch, landmark, passband edge, or dB-scale
+        # hit). Tracks (start_x, start_center_hz, in_drag). The
+        # `in_drag` flag flips True the first time the cursor moves
+        # past DRAG_TUNE_THRESHOLD_PX, so we can tell a click from a
+        # pan gesture on release: still False = single-click tune to
+        # cursor (legacy behavior); True = pan-tune already updated
+        # the freq during the drag, just clear state.
+        self._drag_tune: tuple[int, float, bool] | None = None
         # Proposed-range emits live during drag — panel forwards to Radio.
         # (Not a Qt Signal here because SpectrumWidget doesn't have the
         # decoration import at that spot; we emit via an existing signal.)
@@ -457,7 +475,12 @@ class SpectrumWidget(_PaintedWidget):
                 self._drag_start_y = int(event.position().y())
                 self.setCursor(Qt.SizeVerCursor)
                 return
-            self.clicked_freq.emit(freq)
+            # Empty spectrum left-press: don't emit clicked_freq yet.
+            # Stash drag-tune candidate state — mouseMoveEvent decides
+            # whether this becomes a pan-tune; mouseReleaseEvent fires
+            # the legacy single-click tune if no pan happened.
+            self._drag_tune = (int(x), float(self._center_hz), False)
+            self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             gpos = event.globalPosition().toPoint()
             self.right_clicked_freq.emit(freq, shift, gpos)
@@ -509,10 +532,54 @@ class SpectrumWidget(_PaintedWidget):
                                      start_width * (1.015 ** -dy_eff)))
             self.notch_q_drag.emit(freq, new_width)
             return
+        # Click-and-drag tune (pan). Sign convention: cursor moves
+        # right → spectrum should slide right "following the finger" →
+        # so center freq DECREASES (lower freqs come into view from
+        # the left). The "drag the spectrum like a Google Maps view"
+        # interaction model is the common SDR-client convention.
+        if self._drag_tune is not None:
+            start_x, start_center, in_drag = self._drag_tune
+            dx = int(event.position().x()) - start_x
+            if not in_drag:
+                if abs(dx) < self.DRAG_TUNE_THRESHOLD_PX:
+                    return  # still inside the click dead-zone
+                in_drag = True
+                self._drag_tune = (start_x, start_center, True)
+                self.setCursor(Qt.ClosedHandCursor)
+            if self._span_hz <= 0 or self.width() <= 0:
+                return
+            hz_per_px = self._span_hz / self.width()
+            new_center = start_center - dx * hz_per_px
+            # Reuse the existing tune signal — handler is just
+            # set_freq_hz(int(...)) so frequent updates are cheap and
+            # the radio dedupes same-value writes downstream.
+            self.clicked_freq.emit(float(new_center))
+            return
         # Hover cursor hint — only update when not already dragging so
         # we don't fight Qt's drag-cursor state. Landmarks get a
         # pointing-hand cursor to telegraph "this is clickable."
         y = event.position().y()
+        # Notch hover: callout tooltip + cursor hint.
+        # Tooltip shows the absolute freq + width + state so the
+        # operator can identify which notch is which without
+        # right-clicking.
+        notch_hit = self._nearest_notch_at_x(x)
+        if notch_hit is not None:
+            freq, width_hz, active, deep = notch_hit
+            flags = []
+            if not active:
+                flags.append("INACTIVE")
+            if deep:
+                flags.append("DEEP")
+            flag_str = (" — " + " / ".join(flags)) if flags else ""
+            tip = (f"Notch  {freq/1e6:.4f} MHz\n"
+                   f"Width  {int(round(width_hz))} Hz{flag_str}")
+            self.setToolTip(tip)
+            self.setCursor(Qt.SizeVerCursor)
+            return
+        # Clear tooltip when not over a notch so it doesn't linger.
+        if self.toolTip():
+            self.setToolTip("")
         if self._landmark_at(x, y) is not None:
             self.setCursor(Qt.PointingHandCursor)
         elif self._db_scale_mode_at(x, y) is not None:
@@ -536,6 +603,17 @@ class SpectrumWidget(_PaintedWidget):
         if self._drag_notch is not None:
             self._drag_notch = None
             self.setCursor(Qt.CrossCursor)
+            return
+        # Drag-tune release. If we never crossed the threshold this
+        # was a plain click — fire the legacy tune-to-cursor so a
+        # sharp single click still re-tunes to exactly where the user
+        # clicked (the test the operator instinctively reaches for).
+        if self._drag_tune is not None:
+            start_x, _start_center, in_drag = self._drag_tune
+            self._drag_tune = None
+            self.setCursor(Qt.CrossCursor)
+            if not in_drag:
+                self.clicked_freq.emit(self._freq_at_x(float(start_x)))
 
     def wheelEvent(self, event):
         if self.width() <= 0:
@@ -609,6 +687,10 @@ class SpectrumWidget(_PaintedWidget):
         BAND_STRIP_H = 10         # colored segment band
         LANDMARK_STRIP_H = 12     # landmark triangles + labels
         top_reserve = 0
+        # Reset per-frame; the band-plan branch below adds to it. The
+        # spot packer reads this after band-plan paint to know where it
+        # can start its first row.
+        self._band_plan_reserved_px = 0
         if (self._band_plan_region != "NONE"
                 and self._span_hz > 0 and w > 0):
             from lyra import band_plan as _bp
@@ -702,6 +784,9 @@ class SpectrumWidget(_PaintedWidget):
                         p.drawText(ex + 3,
                                    h - 22,
                                    f"{b['name']} EDGE")
+            # Publish the reserved height so the spot packer below can
+            # avoid colliding with the segment strip + landmark triangles.
+            self._band_plan_reserved_px = top_reserve
 
         # RX passband overlay — drawn UNDER the trace so the spectrum
         # line remains fully legible. Translucent cyan fill + dashed
@@ -919,7 +1004,7 @@ class SpectrumWidget(_PaintedWidget):
         p.setPen(QPen(QColor(255, 170, 80, 220), 1, Qt.DashLine))
         p.drawLine(cx, 0, cx, h)
 
-        # Notch markers — Thetis-style filled rectangle spanning the
+        # Notch markers — filled rectangle spanning the
         # notch's -3 dB bandwidth (the actual region the filter
         # attenuates). Operators see immediately what's getting
         # killed in Hz, with no guessing about Q-vs-bandwidth.
@@ -1065,7 +1150,17 @@ class SpectrumWidget(_PaintedWidget):
                     continue   # no free row — drop this frame
 
                 row_ranges[chosen_row].append((x_start, x_end))
-                by = 2 + chosen_row * (box_h + 2)
+                # Offset spot rows below the band-plan overlay (segment
+                # strip + landmark triangles) so callsign boxes don't
+                # paint over the colored mode bar or the FT8 / FT4 /
+                # WSPR triangle markers. Adds a 3 px gap so the spot
+                # boxes sit just under the triangle labels rather than
+                # touching them. When band-plan overlay is off
+                # (_band_plan_reserved_px == 0) this collapses back to
+                # the original "by = 2 + ..." behavior.
+                row_y0 = (self._band_plan_reserved_px + 3
+                          if self._band_plan_reserved_px > 0 else 2)
+                by = row_y0 + chosen_row * (box_h + 2)
                 placed.append((s, nx, bx, by, tw))
 
             # Render placed spots with age-based alpha.
@@ -1121,6 +1216,8 @@ class WaterfallWidget(_PaintedWidget):
     notch_q_drag = Signal(float, float)
 
     NOTCH_HIT_PX = 14
+    DRAG_TUNE_THRESHOLD_PX = 5  # mirror SpectrumWidget so the same
+                                # gesture works on either view
 
     def __init__(self, parent=None, rows: int = 500):
         super().__init__(parent)
@@ -1135,6 +1232,8 @@ class WaterfallWidget(_PaintedWidget):
         self._notches: list[tuple[float, float, bool, bool]] = []
         self._drag_notch: tuple[float, float, bool, bool] | None = None
         self._drag_start_y: int = 0
+        # Click-vs-drag-tune state — see SpectrumWidget for design notes.
+        self._drag_tune: tuple[int, float, bool] | None = None
         # Palette is looked up by name so the Visuals tab can hot-swap
         # it without reconstructing the widget. Name is persisted via
         # QSettings and restored on startup.
@@ -1143,6 +1242,9 @@ class WaterfallWidget(_PaintedWidget):
         self._palette = palettes.get(self._palette_name)
         self.setMinimumHeight(200)
         self.setCursor(Qt.CrossCursor)
+        # Enable hover events without a mouse button held — needed
+        # for the notch-callout tooltip to fire on plain hover.
+        self.setMouseTracking(True)
 
     def set_tuning(self, center_hz: float, span_hz: float):
         self._center_hz = center_hz
@@ -1201,28 +1303,80 @@ class WaterfallWidget(_PaintedWidget):
                 self._drag_start_y = int(event.position().y())
                 self.setCursor(Qt.SizeVerCursor)
                 return
-            self.clicked_freq.emit(freq)
+            # Defer tune emit — could be a click OR start of a pan.
+            # See SpectrumWidget mousePressEvent for full design notes.
+            self._drag_tune = (int(x), float(self._center_hz), False)
+            self.setCursor(Qt.OpenHandCursor)
         elif event.button() == Qt.RightButton:
             gpos = event.globalPosition().toPoint()
             self.right_clicked_freq.emit(freq, shift, gpos)
 
     def mouseMoveEvent(self, event):
-        if self._drag_notch is None:
+        if self._drag_notch is not None:
+            freq, start_width, _active, _deep = self._drag_notch
+            dy = self._drag_start_y - int(event.position().y())
+            if abs(dy) < 4:  # dead zone
+                return
+            dy_eff = dy - (4 if dy > 0 else -4)
+            # Drag UP = narrower (matches wheel up-narrow convention)
+            new_width = max(5.0, min(2000.0,
+                                     start_width * (1.015 ** -dy_eff)))
+            self.notch_q_drag.emit(freq, new_width)
             return
-        freq, start_width, _active, _deep = self._drag_notch
-        dy = self._drag_start_y - int(event.position().y())
-        if abs(dy) < 4:  # dead zone
+        # Drag-tune (pan). See SpectrumWidget mouseMoveEvent for the
+        # sign convention and threshold rationale — same gesture here.
+        if self._drag_tune is not None:
+            start_x, start_center, in_drag = self._drag_tune
+            dx = int(event.position().x()) - start_x
+            if not in_drag:
+                if abs(dx) < self.DRAG_TUNE_THRESHOLD_PX:
+                    return
+                in_drag = True
+                self._drag_tune = (start_x, start_center, True)
+                self.setCursor(Qt.ClosedHandCursor)
+            if self._span_hz <= 0 or self.width() <= 0:
+                return
+            hz_per_px = self._span_hz / self.width()
+            new_center = start_center - dx * hz_per_px
+            self.clicked_freq.emit(float(new_center))
             return
-        dy_eff = dy - (4 if dy > 0 else -4)
-        # Drag UP = narrower (matches wheel up-narrow convention)
-        new_width = max(5.0, min(2000.0,
-                                 start_width * (1.015 ** -dy_eff)))
-        self.notch_q_drag.emit(freq, new_width)
+        # Hover callout — same payload as the
+        # spectrum widget so the operator gets identical info no
+        # matter which view they hover.
+        x = event.position().x()
+        notch_hit = self._nearest_notch_at_x(x)
+        if notch_hit is not None:
+            freq, width_hz, active, deep = notch_hit
+            flags = []
+            if not active:
+                flags.append("INACTIVE")
+            if deep:
+                flags.append("DEEP")
+            flag_str = (" — " + " / ".join(flags)) if flags else ""
+            self.setToolTip(
+                f"Notch  {freq/1e6:.4f} MHz\n"
+                f"Width  {int(round(width_hz))} Hz{flag_str}"
+            )
+            self.setCursor(Qt.SizeVerCursor)
+        else:
+            if self.toolTip():
+                self.setToolTip("")
+            self.setCursor(Qt.CrossCursor)
 
     def mouseReleaseEvent(self, event):
-        if self._drag_notch is not None and event.button() == Qt.LeftButton:
+        if event.button() != Qt.LeftButton:
+            return
+        if self._drag_notch is not None:
             self._drag_notch = None
             self.setCursor(Qt.CrossCursor)
+            return
+        if self._drag_tune is not None:
+            start_x, _start_center, in_drag = self._drag_tune
+            self._drag_tune = None
+            self.setCursor(Qt.CrossCursor)
+            if not in_drag:
+                # Plain click — fire the legacy tune-to-cursor.
+                self.clicked_freq.emit(self._freq_at_x(float(start_x)))
 
     def wheelEvent(self, event):
         if self.width() <= 0:
@@ -1315,7 +1469,7 @@ class WaterfallWidget(_PaintedWidget):
         p.drawLine(cx, 0, cx, self.height())
 
         # Notch markers — match the spectrum widget's filled-rectangle
-        # style (Thetis convention). Inactive notches render in grey
+        # style (the SDR-client convention). Inactive notches render in grey
         # so the operator can A/B without losing placement. Deep
         # notches get thicker edge outlines.
         if self._notches and self._span_hz > 0:

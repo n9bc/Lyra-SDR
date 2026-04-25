@@ -16,10 +16,20 @@ import numpy as np
 class AudioSink(Protocol):
     def write(self, audio: np.ndarray) -> None: ...
     def close(self) -> None: ...
+    # Optional stereo balance support — sinks that can address
+    # left/right channels independently (PC Soundcard) honor this;
+    # sinks that physically can't (AK4951 — single mono pair) ignore.
+    def set_lr_gains(self, left: float, right: float) -> None: ...
 
 
 class AK4951Sink:
     """Route audio to the HL2's AK4951 line-level output via EP2 TX slots.
+
+    The AK4951 is a true STEREO codec: the EP2 audio slot has separate
+    16-bit Left + Right fields, and the gateware routes both to the
+    AK4951 DAC's L/R channels. So Balance is honored end-to-end — we
+    apply per-channel gains here and feed (N, 2) stereo into the EP2
+    queue, which packs L and R independently into the frame.
 
     Sink-swap cleanup: the underlying HL2Stream owns a TX audio
     queue (deque) that's NOT per-sink — it's a long-lived buffer
@@ -36,11 +46,33 @@ class AK4951Sink:
         if hasattr(stream, "clear_tx_audio"):
             stream.clear_tx_audio()
         self._stream.inject_audio_tx = True
+        # Stereo balance gains. Default = equal-power center
+        # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
+        # operator moves the Balance slider, exactly like SoundDeviceSink.
+        self._left_gain = 0.7071067811865476
+        self._right_gain = 0.7071067811865476
 
     def write(self, audio: np.ndarray) -> None:
         if audio.size == 0:
             return
-        self._stream.queue_tx_audio(audio.astype(np.float32))
+        mono = audio.astype(np.float32).reshape(-1)
+        # Apply per-channel gains and feed stereo so the EP2 packer
+        # writes independent L and R values into each audio slot.
+        # When the operator hasn't touched Balance both gains are
+        # √2/2 ≈ 0.707, so the AK4951 hears the same audio in both
+        # ears as the legacy mono-duplicated path did.
+        l = mono * self._left_gain
+        r = mono * self._right_gain
+        stereo = np.stack((l, r), axis=1)                # (N, 2)
+        self._stream.queue_tx_audio(stereo)
+
+    def set_lr_gains(self, left: float, right: float) -> None:
+        """Update the L/R channel gains. Called by Radio whenever the
+        operator changes the Balance slider; same contract as
+        SoundDeviceSink. Equal-power pan law lives in
+        Radio.balance_lr_gains which feeds this."""
+        self._left_gain = float(left)
+        self._right_gain = float(right)
 
     def close(self) -> None:
         self._stream.inject_audio_tx = False
@@ -63,7 +95,8 @@ class SoundDeviceSink:
       interfaces, silently drops mono frames on some drivers). We
       explicitly pick the WASAPI host API's default output device
       when the caller didn't specify one. WASAPI is what every
-      serious audio app (DAWs, Thetis, ExpertSDR3, browsers) uses.
+      serious modern audio app on Windows uses (DAWs, SDR clients,
+      browsers).
 
     - **Opens stereo, writes duplicated mono.** The demod chain is
       mono (SSB/CW/AM/FM/DIGU all produce a single audio channel).
@@ -95,6 +128,11 @@ class SoundDeviceSink:
             blocksize=blocksize, device=device,
         )
         self._stream.start()
+        # Stereo balance gains. Default = equal-power center
+        # (cos/sin at π/4 = √2/2 each). Updated by Radio whenever the
+        # operator moves the Balance slider.
+        self._left_gain = 0.7071067811865476
+        self._right_gain = 0.7071067811865476
 
     @staticmethod
     def _pick_wasapi_default(sd):
@@ -119,9 +157,14 @@ class SoundDeviceSink:
         if audio.size == 0:
             return
         mono = audio.astype(np.float32).reshape(-1)
-        # Duplicate mono to (N, 2) stereo — mandatory for S/PDIF,
-        # harmless on analog.
-        a = np.stack((mono, mono), axis=1)
+        # Stereo build with per-channel balance gains applied.
+        # When the operator hasn't moved the Balance slider both
+        # gains are √2/2 (equal-power center) and the result is the
+        # same audio in both ears as before the balance feature
+        # existed.
+        l = mono * self._left_gain
+        r = mono * self._right_gain
+        a = np.stack((l, r), axis=1)
         try:
             self._stream.write(a)
         except self._sd.PortAudioError:
@@ -131,6 +174,14 @@ class SoundDeviceSink:
             # reports "no audio" with a clean stream, re-enable the
             # diagnostic prints in the git history for this file.
             pass
+
+    def set_lr_gains(self, left: float, right: float) -> None:
+        """Update the L/R channel gains. Called by Radio whenever
+        the operator changes the Balance slider. Values are floats
+        in [0, 1]; equal-power pan law lives in Radio.balance_lr_gains
+        which feeds this."""
+        self._left_gain = float(left)
+        self._right_gain = float(right)
 
     def close(self) -> None:
         try:

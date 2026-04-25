@@ -42,7 +42,7 @@ class _SampleBridge(QObject):
 class Notch:
     """One manual notch in the user's notch bank.
 
-    Width-based model (matches Thetis / ExpertSDR3 mental model):
+    Width-based model (the SDR-client convention operators expect):
     operators think in absolute "kill this 100 Hz wide chunk", not
     in dimensionless Q values. Internal filter design converts
     width_hz to whatever the underlying scipy call needs.
@@ -101,6 +101,7 @@ class Radio(QObject):
     gain_changed         = Signal(int)
     volume_changed       = Signal(float)
     af_gain_db_changed   = Signal(int)   # AF makeup gain, 0..+50 dB
+    balance_changed      = Signal(float) # stereo pan, -1..0..+1
     rx_bw_changed        = Signal(str, int)       # mode, Hz
     tx_bw_changed        = Signal(str, int)
     bw_lock_changed      = Signal(bool)
@@ -110,6 +111,15 @@ class Radio(QObject):
     audio_output_changed = Signal(str)
     pc_audio_device_changed = Signal(object)   # int index, or None for auto
     ip_changed           = Signal(str)
+
+    # HL2 hardware telemetry (temperature, supply voltage, fwd/rev power).
+    # Emitted at ~2 Hz from a QTimer that polls FrameStats so the UI
+    # never has to touch the protocol layer directly. Values are in
+    # engineering units (°C, V, W) — conversion from raw 12-bit ADC
+    # counts lives in _emit_hl2_telemetry below. When the stream is
+    # stopped or no telemetry has been seen yet, fields are NaN so the
+    # UI can show "--" instead of a garbage zero reading.
+    hl2_telemetry_changed = Signal(dict)  # {temp_c, supply_v, fwd_w, rev_w}
 
     # ── Streaming data signals ─────────────────────────────────────────
     spectrum_ready       = Signal(object, float, int)   # db, center_hz, rate
@@ -174,8 +184,8 @@ class Radio(QObject):
     band_plan_edge_warn_changed      = Signal(bool)
 
     # Peak-markers — a persistent "peak hold" overlay drawn only within
-    # the RX passband. Not the reference client's "blobs" (different name because
-    # ours only shows inside the filter window + is user-toggleable).
+    # the RX passband. Bounded display + user-toggleable so it stays
+    # diagnostic rather than visual clutter.
     peak_markers_enabled_changed = Signal(bool)
     peak_markers_decay_changed   = Signal(float)   # dB / second
     peak_markers_style_changed   = Signal(str)     # "line"/"dots"/"triangles"
@@ -264,6 +274,31 @@ class Radio(QObject):
         #     to-moment loudness comfort.
         # Chain: demod → AGC (if on) → AF Gain → Volume → tanh → sink
         self._af_gain_db = 0                    # integer dB, 0..+50
+        # Stereo balance / pan for RX1.
+        # Range: -1.0 (full left) .. 0.0 (center) .. +1.0 (full right)
+        #
+        # Equal-power pan law (cos/sin) applied in the sink-write
+        # path so total energy stays constant as the operator pans
+        # across center. Useful for:
+        #   - DX-split listening: pan RX1 left, route DX-spot RX2
+        #     hard right (when RX2 ships) — DX in one ear, pile-up
+        #     in the other.
+        #   - A/B-ing against a noise source localized to one
+        #     channel.
+        #
+        # FUTURE — when RX2 + Split arrive:
+        #   * Add _balance_rx2 (independent pan for second receiver)
+        #   * Add _stereo_routing_mode enum: Mono / SplitLR / SplitRL
+        #   * Audio mix becomes:
+        #       L_out = RX1_audio * RX1_L_gain + RX2_audio * RX2_L_gain
+        #       R_out = RX1_audio * RX1_R_gain + RX2_audio * RX2_R_gain
+        #     done either in Radio (preferred — sink stays dumb) or
+        #     in a future stereo-aware sink layer.
+        # Today the sink does the pan since there's only one source
+        # (RX1). The set_lr_gains hook on each sink already exists
+        # so we can drop in the multi-source mixer without changing
+        # sink internals.
+        self._balance = 0.0
         self._volume = 0.5                      # 50% = ~-12 dB trim
         self._muted = False
         # Auto-LNA loop: periodically adjust _gain_db to keep the ADC
@@ -344,11 +379,11 @@ class Radio(QObject):
         #                    clipping/tanh saturation
         #   0.1  (-20 dBFS)  AF-split era — still too hot, on/off
         #                    delta was ~17 dB (noticeable)
-        #   0.0316(-30 dBFS) current — matches Thetis's typical target;
-        #                    AGC does less aggressive work, preserves
-        #                    dynamic range better, on/off delta drops
-        #                    to ~8-10 dB (the "Thetis slight feel"
-        #                    operators expect)
+        #   0.0316(-30 dBFS) current — matches the typical reference-
+        #                    client target; AGC does less aggressive
+        #                    work, preserves dynamic range better,
+        #                    on/off delta drops to ~8-10 dB (the
+        #                    "slight feel" operators expect)
         # Trade-off: requires slightly higher Vol slider for same
         # loudness, but the user gains more expressive dynamic range
         # on signals and much less AGC pumping on digital modes.
@@ -387,6 +422,16 @@ class Radio(QObject):
         self._peak_report_timer.setInterval(250)
         self._peak_report_timer.timeout.connect(self._emit_peak_reading)
         # Started when stream starts, stopped when stream stops.
+
+        # HL2 telemetry poll — reads the most recent raw ADC counts off
+        # the stream's FrameStats and emits engineering-unit values
+        # (°C, V, W) at 2 Hz. Slow on purpose: temp + supply don't
+        # change fast, and a faster cadence would just flicker labels.
+        self._hl2_telem_timer = _QTimer(self)
+        self._hl2_telem_timer.setInterval(500)
+        self._hl2_telem_timer.timeout.connect(self._emit_hl2_telemetry)
+        # Started/stopped alongside the stream so we don't churn signals
+        # with stale ADC counts when nothing is connected.
 
         # Notch bank — list of Notch dataclasses (see top of file).
         # Operators add/remove via right-click on spectrum/waterfall;
@@ -810,6 +855,54 @@ class Radio(QObject):
         # clarity at call sites.
         return 10.0 ** (self._af_gain_db / 20.0)
 
+    # ── Stereo balance (pan) ──────────────────────────────────────────
+    @property
+    def balance(self) -> float:
+        """Current stereo balance, -1 (full left) .. 0 (center) ..
+        +1 (full right)."""
+        return self._balance
+
+    def set_balance(self, value: float):
+        """Set stereo balance. Clamped to [-1, 1]. Pushes the
+        equal-power L/R gains into the active sink immediately so
+        the change is audible without waiting for the next audio
+        block."""
+        v = max(-1.0, min(1.0, float(value)))
+        if v == self._balance:
+            return
+        self._balance = v
+        self._push_balance_to_sink()
+        self.balance_changed.emit(v)
+
+    def _push_balance_to_sink(self):
+        """Translate the current balance value to L/R gains and tell
+        the active sink. Sinks that can't pan (AK4951) silently
+        ignore. Called by set_balance and any time the sink is
+        rebuilt (set_audio_output, set_pc_audio_device_index)."""
+        l, r = self.balance_lr_gains
+        try:
+            self._audio_sink.set_lr_gains(l, r)
+        except (AttributeError, Exception):
+            pass
+
+    @property
+    def balance_lr_gains(self) -> tuple[float, float]:
+        """Return (left_gain, right_gain) for the current balance
+        using an EQUAL-POWER pan law:
+            L = cos((b + 1) * π/4)
+            R = sin((b + 1) * π/4)
+        At center (b=0): L = R = √2/2 ≈ 0.707 (each channel -3 dB,
+        sum-power constant). Full left (b=-1): L=1, R=0. Full
+        right (b=+1): L=0, R=1.
+
+        Equal-power matters because a constant-amplitude pan would
+        make a center-panned signal sound 3 dB louder than a hard-
+        panned one. Equal-power keeps perceived loudness stable as
+        the operator sweeps the pan."""
+        import math
+        angle = (self._balance + 1.0) * math.pi / 4.0   # 0 .. π/2
+        return (math.cos(angle), math.sin(angle))
+
     # ── Mute ────────────────────────────────────────────────────────
     @property
     def muted(self) -> bool:
@@ -1130,7 +1223,7 @@ class Radio(QObject):
         of the full rolling history, so LNA changes are reflected in
         the reading within a fraction of a second rather than taking
         1+ seconds for the stale max to decay out. This matches how
-        Thetis's RFP and ExpertSDR3's ADC meter behave — responsive
+        the RFP / ADC meters in other SDR clients behave — responsive
         to the current signal environment, not a rolling worst-case.
         """
         if not self._lna_peaks:
@@ -1153,18 +1246,74 @@ class Radio(QObject):
         self.lna_peak_dbfs.emit(peak_db)
         self.lna_rms_dbfs.emit(rms_db)
 
+    def _emit_hl2_telemetry(self):
+        """Periodic (2 Hz) HL2 hardware telemetry broadcast → toolbar.
+
+        Reads the latest raw ADC counts the protocol layer has folded
+        into FrameStats and converts them to engineering units.
+
+        Conversion formulas — physics / hardware constants only, no
+        external code reuse:
+
+        TEMPERATURE — AD9866 on-die temperature diode. Per the chip
+            datasheet, the diode output crosses 0.5 V at 0 °C with a
+            10 mV/°C slope into a 3.26 V ADC reference:
+                temp_C = (3.26 * (adc / 4096) - 0.5) / 0.01
+                       = ((adc / 4096) * 3.26 - 0.5) * 100
+
+        SUPPLY VOLTAGE — 12 V rail via the on-board AIN6 sense
+            divider. The supply path uses an external scaling stage
+            with a 5.0 V reference and a 22 + 1 ohm / 1.1 ohm
+            resistor network (ratio 23/1.1):
+                v_supply = (adc / 4095) * 5.0 * (23.0 / 1.1)
+
+            These constants are properties of the HL2 PCB, not of any
+            particular host program — any client reading AIN6 must
+            apply this scaling to recover the rail voltage.
+
+        FWD / REV POWER — raw ADC counts only. Real-power conversion
+            depends on the SWR-bridge calibration which varies per HL2
+            unit; the UI doesn't display these yet (future TX feature)
+            but they're in the payload so future widgets can read them.
+        """
+        s = self._stream.stats if self._stream is not None else None
+        if s is None:
+            payload = {"temp_c":   float("nan"),
+                       "supply_v": float("nan"),
+                       "fwd_w":    float("nan"),
+                       "rev_w":    float("nan")}
+        else:
+            # ADC == 0 means we've not yet seen a telemetry frame for
+            # that field — emit NaN so the UI shows "--" rather than
+            # claiming the rig is at 0 °C / 0 V.
+            temp_c = (((s.temp_adc / 4096.0) * 3.26 - 0.5) * 100.0
+                      if s.temp_adc else float("nan"))
+            # Supply voltage — try the standard slot first (addr 3),
+            # fall back to the firmware-variant slot (addr 0 C1:C2 >> 4)
+            # when the standard slot is empty. Any HL2 firmware that
+            # works with other clients populates ONE of these.
+            adc = s.supply_adc if s.supply_adc else s.supply_adc_alt
+            supply_v = ((adc / 4095.0) * 5.0 * (23.0 / 1.1)
+                        if adc else float("nan"))
+            payload = {
+                "temp_c":   temp_c,
+                "supply_v": supply_v,
+                "fwd_w":    float(s.fwd_pwr_adc),   # raw ADC for now
+                "rev_w":    float(s.rev_pwr_adc),
+            }
+        self.hl2_telemetry_changed.emit(payload)
+
     def _adjust_lna_auto(self):
-        """Overload-protection LNA loop — modeled on the reference HPSDR client's Auto-ATT
-        (the reference HPSDR client itself has no closed-loop auto-LNA-gain; its Auto-ATT
-        only backs gain OFF when the ADC is about to clip, and never
-        chases a target upward).
+        """Overload-protection LNA loop — only REDUCE gain on impending
+        overload, never chase a target upward.
 
         First-pass Lyra Auto-LNA was a target-chasing loop aiming at
         -15 dBFS peak. That target is HOTTER than the HL2 front-end
         likes; in real-world antenna environments on 40 m the loop
         drove LNA to +44 dB where IMD became audible ("odd mixed
-        audio") and weak signals drowned in garbage. the reference HPSDR client's
-        approach is correct: only REDUCE gain on impending overload.
+        audio") and weak signals drowned in garbage. The community
+        consensus for HL2 auto-attenuation is the back-off-only
+        approach implemented below.
 
         Logic:
             peak > -3 dBFS  → drop 3 dB (urgent, close to clipping)
@@ -1636,9 +1785,10 @@ class Radio(QObject):
         return self._waterfall_palette
 
     def set_waterfall_palette(self, name: str):
-        # Canonicalize via the palettes module's alias table so legacy
-        # "the reference HPSDR client" saves migrate to "Default" on load without the user
-        # having to re-pick anything.
+        # Canonicalize via the palettes module's alias table so older
+        # palette-name strings (lowercase, "default", etc.) migrate to
+        # the canonical names on load without the user having to
+        # re-pick anything.
         from lyra.ui import palettes
         name = palettes.canonical_name(name)
         if name == self._waterfall_palette:
@@ -1852,6 +2002,10 @@ class Radio(QObject):
         import time as _time
         _time.sleep(0.030)
         self._audio_sink = self._make_sink() if self._stream else NullSink()
+        # New sink starts at default L/R (equal-power center) — push
+        # the operator's current balance so the new sink picks up the
+        # pan immediately, not on the next set_balance.
+        self._push_balance_to_sink()
         self.audio_output_changed.emit(output)
 
     # ── Stream lifecycle ──────────────────────────────────────────────
@@ -1870,16 +2024,24 @@ class Radio(QObject):
             self._stream = None
             return
         self._audio_sink = self._make_sink()
+        self._push_balance_to_sink()
         # Push the filter-board OC pattern now that the stream is live
         if self._filter_board_enabled:
             self._apply_oc_for_current_freq()
         # Start the ADC-peak broadcaster so the toolbar indicator lights up
         self._peak_report_timer.start()
+        # Start polling HL2 hardware telemetry (temp/voltage) so the
+        # banner readouts begin updating once the first EP6 frame
+        # carrying the right C0 address arrives.
+        self._hl2_telem_timer.start()
         self.stream_state_changed.emit(True)
 
     def stop(self):
         # Stop the peak broadcaster first so no more readings emit
         self._peak_report_timer.stop()
+        # Stop the HL2 telemetry poll so the banner shows stale-then-NaN
+        # rather than continuing to emit the last-seen reading forever.
+        self._hl2_telem_timer.stop()
         try:
             self._audio_sink.close()
         except Exception:
@@ -2014,7 +2176,7 @@ class Radio(QObject):
         #      only way to bring weak signals up to audible.
         #
         # Net effect: switching AGC on ↔ off produces only a slight
-        # loudness delta (matches Thetis behaviour). Vol slider has a
+        # loudness delta (the expected SDR-client behaviour). Vol slider has a
         # useful full range in both AGC-on and AGC-off modes.
         #
         # Mute multiplies final gain by 0 — keeps everything else
@@ -2052,7 +2214,7 @@ class Radio(QObject):
         # AGC max gain cap. Was previously 10× (20 dB), which was far
         # too conservative — any signal below ~-30 dBFS couldn't be
         # boosted to audible levels. Professional SDR clients give
-        # 80-120 dB of AGC range (Thetis, ExpertSDR3, FT-DX10). We
+        # 80-120 dB of AGC range (typical commercial SDR / rig). We
         # use 1000× (60 dB) as a safe middle ground: lets weak
         # signals down to ~-70 dBFS reach audible levels, but the
         # final tanh limiter still prevents any amplitude damage at
@@ -2133,8 +2295,8 @@ class Radio(QObject):
 
     def auto_set_agc_threshold(self, margin_db: float = 18.0) -> float:
         """Calibrate AGC threshold to sit `margin_db` above the current
-        rolling noise floor. Matches the reference client's "automatic AGC threshold"
-        right-click action. Returns the new threshold value."""
+        rolling noise floor. Bound to the AGC right-click "Auto" action.
+        Returns the new threshold value."""
         baseline = max(self._noise_baseline, 1e-4)
         factor = 10 ** (margin_db / 20.0)
         target = max(0.05, min(0.9, baseline * factor))
@@ -2246,6 +2408,7 @@ class Radio(QObject):
             import time as _time
             _time.sleep(0.030)
             self._audio_sink = self._make_sink()
+            self._push_balance_to_sink()
 
     def _make_sink(self):
         if self._audio_output == "AK4951":

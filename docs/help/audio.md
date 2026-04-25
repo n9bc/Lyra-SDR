@@ -1,7 +1,7 @@
 # Audio Routing
 
-Lyra supports two audio output paths and a layered gain chain that
-matches Thetis / ExpertSDR3 conventions.
+Lyra supports two audio output paths and a layered gain chain
+following the standard SDR-client conventions.
 
 ## Output sinks
 
@@ -41,7 +41,7 @@ older MME. MME (the system default) is 20+ years old and silently
 drops mono frames on S/PDIF / TOSLINK outputs — symptom is "Lyra
 opens its audio stream OK but no sound comes out, even though every
 other Windows app works fine on the same speakers." WASAPI is what
-modern audio apps (DAWs, Thetis, ExpertSDR3, browsers) use. Lyra
+modern audio apps on Windows use (DAWs, SDR clients, browsers). Lyra
 opens stereo and duplicates mono into both channels so the same
 audio path works on analog AND digital outputs.
 
@@ -107,7 +107,7 @@ your only level control between demod and Volume — that's what it's
 designed for.
 
 Switching AGC on ↔ off produces only a small loudness delta when AF
-Gain is sensibly set (Thetis-like behavior). If you see a big jump,
+Gain is sensibly set (the expected SDR-client behavior). If you see a big jump,
 either bump AF Gain higher (to bring AGC-off levels closer to
 AGC-on) or lower it (to ease back when AGC-on is too loud).
 

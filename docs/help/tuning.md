@@ -25,8 +25,8 @@ The wheel uses the most precise specifier available, in this order:
 3. **No Step combo set, but a digit is currently selected** (from a
    previous click) → uses that digit's place value as a fallback.
 
-This matches Thetis / ExpertSDR3 — combo as default, per-digit
-hover as override-by-precision-aim.
+Combo as default tuning resolution, per-digit hover as
+override-by-precision-aim — the standard SDR-client convention.
 
 ## Step combo
 
@@ -93,6 +93,22 @@ currently-selected Step combo value.
 Left-click anywhere on the spectrum or waterfall and the radio
 re-tunes to that frequency. Best for visual band hunting — you can
 SEE the signal you want to land on before clicking it.
+
+### Option D: Click-and-drag the spectrum (pan tuning)
+
+Press and hold left button on empty spectrum (or waterfall), then
+drag horizontally — the spectrum slides under your cursor like
+dragging a Google Maps view. Drag right and lower frequencies come
+into view from the left; drag left and higher frequencies appear
+from the right. Release to settle on the new center.
+
+The cursor changes to a hand to telegraph "you're in pan mode." A
+small dead-zone (≈5 px) lets a quick click still snap-tune to the
+exact cursor frequency without entering pan mode by accident.
+
+Pan-tune is gated on left-click in **empty** spectrum — clicks on
+notches, landmark triangles, the dB-scale strip, or passband edges
+keep their existing drag-to-resize behavior.
 
 ## Bands
 

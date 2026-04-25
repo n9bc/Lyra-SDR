@@ -51,6 +51,26 @@ class FrameStats:
     seq_expected: int = -1
     seq_errors: int = 0
     last_c1_c4: bytes = b""
+    # HL2 telemetry — most recent raw 12-bit ADC counts the radio
+    # reported via EP6 C0 telemetry addresses (each address rotates
+    # in, so any field may briefly lag while we wait for the next
+    # cycle of that address to arrive). Engineering-unit conversion
+    # (temp °C, supply V, etc.) lives in Radio so the protocol layer
+    # stays agnostic to calibration constants.
+    #
+    # See HL2 wiki "Protocol" page — addresses we decode:
+    #   addr 2 (C0 = 0x10): C1+C2 = forward power adc, C3+C4 = reverse power adc
+    #   addr 3 (C0 = 0x18): C1+C2 = AIN3 (12V supply via divider),
+    #                       C3+C4 = AIN4 (AD9866 on-die temp sensor)
+    fwd_pwr_adc: int = 0
+    rev_pwr_adc: int = 0
+    supply_adc: int = 0
+    temp_adc:   int = 0
+    # Fallback supply candidate from addr 0 C1:C2 (some HL2 firmware
+    # variants pack AIN6 / supply ADC into bits[15:4] of this 16-bit
+    # field instead of using addr 3). Radio's _emit_hl2_telemetry
+    # uses this when the primary supply_adc slot is empty.
+    supply_adc_alt: int = 0
 
 
 def _build_start_stop_packet(flags: int) -> bytes:
@@ -88,6 +108,9 @@ def _parse_iq_frame(data: bytes) -> Optional[tuple[int, np.ndarray, bytes, bytes
     """Return (seq, samples, cc_block0, cc_block1) or None if invalid.
 
     Samples are a concatenation of both USB-block halves (126 complex samples).
+    cc_block is a 5-byte slice (C0..C4); C0 carries the telemetry
+    address in bits[7:3] and live state flags in bits[2:0] for HPSDR
+    Protocol 1 EP6 frames.
     """
     if len(data) != 1032:
         return None
@@ -106,6 +129,60 @@ def _parse_iq_frame(data: bytes) -> Optional[tuple[int, np.ndarray, bytes, bytes
 
     samples = np.concatenate(sample_parts)
     return seq, samples, cc_parts[0], cc_parts[1]
+
+
+def _decode_hl2_telemetry(cc: bytes, stats: "FrameStats") -> None:
+    """Update HL2 telemetry fields on `stats` from one 5-byte C&C
+    block (C0..C4).
+
+    Mapping per the HPSDR Protocol 1 hardware specification for the
+    Hermes-Lite-2 (the AD9866-based HL2 telemetry rotation):
+
+        addr  (C0 >> 3)  C0 byte  payload
+        ----  ----------  -------  -------
+        1     0x08         C1:C2 = AD9866 die temperature (raw ADC)
+                          C3:C4 = forward power (raw ADC)
+        2     0x10         C1:C2 = reverse power (raw ADC)
+        3     0x18         C3:C4 = supply voltage (raw ADC, 12 V rail
+                                  via on-board divider)
+
+    All payload values are 16-bit big-endian (high byte first). The
+    HL2 firmware rotates which address it reports each frame, so any
+    given field refreshes every few frames rather than every one.
+
+    Probe-tap hook: when a HL2Stream has its `_probe_cb` callback set
+    on `stats`, we forward (addr, C1, C2, C3, C4) for every decoded
+    block — the Help → HL2 Telemetry Probe dialog uses this to verify
+    the mapping above against a specific firmware revision.
+    """
+    if len(cc) < 5:
+        return
+    addr = (cc[0] >> 3) & 0x1F
+    # Probe tap (set by the diagnostic dialog only — None when off)
+    probe = getattr(stats, "_probe_cb", None)
+    if probe is not None:
+        try:
+            probe(addr, cc[1], cc[2], cc[3], cc[4])
+        except Exception:
+            pass
+    # Use full 16-bit values here (the HL2 fills all 16 bits in the
+    # ADC field, not just the low 12). Engineering-unit conversion in
+    # Radio assumes a 12-bit-or-larger range and divides accordingly.
+    if addr == 0:
+        # Fallback supply slot. Some HL2 firmware variants put AIN6
+        # (12 V supply) into addr 0 C1:C2 with the 12-bit ADC value
+        # left-shifted by 4 (i.e. occupying bits[15:4] of the 16-bit
+        # field). We capture both interpretations here; Radio picks
+        # whichever yields a plausible reading.
+        word = ((cc[1] << 8) | cc[2]) & 0xFFFF
+        stats.supply_adc_alt = word >> 4
+    elif addr == 1:
+        stats.temp_adc    = ((cc[1] << 8) | cc[2]) & 0xFFFF
+        stats.fwd_pwr_adc = ((cc[3] << 8) | cc[4]) & 0xFFFF
+    elif addr == 2:
+        stats.rev_pwr_adc = ((cc[1] << 8) | cc[2]) & 0xFFFF
+    elif addr == 3:
+        stats.supply_adc  = ((cc[3] << 8) | cc[4]) & 0xFFFF
 
 
 class HL2Stream:
@@ -131,8 +208,10 @@ class HL2Stream:
         # Keepalive C&C — sent on every EP6 frame to prevent the radio's TX
         # queue from underrunning and halting the stream.
         # C4 bit 2 = duplex. Without it, HL2 runs simplex and ignores RX1
-        # frequency writes (RX1 freq gets slaved to TX freq). reference clients always
-        # sets this bit. C4[5:3] = NDDC - 1 (0 = 1 receiver).
+        # frequency writes (RX1 freq gets slaved to TX freq). The duplex
+        # bit is required by HPSDR Protocol 1 for any client that wants
+        # independent RX/TX frequency control. C4[5:3] = NDDC - 1
+        # (0 = 1 receiver).
         self._config_c4 = 0x04  # duplex=1, NDDC=1
         self._keepalive_cc: tuple[int, int, int, int, int] = (
             0x00, SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4
@@ -186,30 +265,42 @@ class HL2Stream:
         return bytes(frame)
 
     def _pack_audio_bytes(self, n_samples: int) -> bytes:
-        """Dequeue up to n_samples, pad with zeros, pack as HPSDR TX stereo."""
+        """Dequeue up to n_samples, pad with zeros, pack as HPSDR TX stereo.
+
+        Queue items are (L, R) float tuples — the AK4951 codec on the
+        HL2 is a true stereo DAC and the EP2 audio slot has separate
+        Left + Right 16-bit fields, so we honor balance / pan by
+        storing per-channel samples and packing them independently.
+        """
         import numpy as np
         with self._tx_audio_lock:
             avail = min(len(self._tx_audio), n_samples)
             pulled = [self._tx_audio.popleft() for _ in range(avail)]
         if avail < n_samples:
-            pulled.extend([0.0] * (n_samples - avail))
-        arr = np.asarray(pulled, dtype=np.float32) * self.tx_audio_gain
-        arr = np.clip(arr, -1.0, 1.0)
-        int16 = (arr * 32767.0).astype(">i2")  # big-endian int16
-        # Each sample: Left + Right + TX_I(0) + TX_Q(0)  (all 16-bit BE)
-        left = int16.tobytes()
-        right = int16.tobytes()
-        tx_iq = (b"\x00\x00" * 2) * n_samples
-        # Interleave:  L R I Q   per sample
+            pulled.extend([(0.0, 0.0)] * (n_samples - avail))
+        # pulled is a list of (L, R) tuples — split into separate arrays.
+        lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
+        lr *= self.tx_audio_gain
+        np.clip(lr, -1.0, 1.0, out=lr)
+        int16 = (lr * 32767.0).astype(">i2")             # shape (N, 2) big-endian
+        left_bytes  = int16[:, 0].tobytes()
+        right_bytes = int16[:, 1].tobytes()
+        # Interleave L R I Q per sample (TX_I/TX_Q stay zero on RX).
         out = bytearray(n_samples * 8)
         for i in range(n_samples):
-            out[i * 8 + 0:i * 8 + 2] = left[i * 2:i * 2 + 2]
-            out[i * 8 + 2:i * 8 + 4] = right[i * 2:i * 2 + 2]
+            out[i * 8 + 0:i * 8 + 2] = left_bytes [i * 2:i * 2 + 2]
+            out[i * 8 + 2:i * 8 + 4] = right_bytes[i * 2:i * 2 + 2]
             # bytes 4..7 already zero
         return bytes(out)
 
-    def queue_tx_audio(self, audio: "np.ndarray"):
+    def queue_tx_audio(self, audio):
         """Push float audio samples (range [-1, 1]) into the EP2 TX queue.
+
+        Accepts either:
+          - 1D mono ndarray  → duplicated to (L, R) for backward compat
+          - 2D stereo ndarray of shape (N, 2)  → stored as (L, R) tuples
+            so per-channel content (e.g. balance / pan output) survives
+            into the AK4951 codec L/R fields of the EP2 audio slot.
 
         NOTE ON >48 kHz OPERATION: the EP2 audio-slot interpretation is
         sample-rate-dependent in the HL2 gateware and we don't fully
@@ -219,8 +310,20 @@ class HL2Stream:
         the PC sound device at rates >48 k. AK4951 output is only
         guaranteed reliable at 48 k.
         """
+        import numpy as np
+        a = np.asarray(audio, dtype=np.float32)
+        if a.ndim == 1:
+            # Mono → duplicate to both channels (legacy behavior).
+            pairs = list(zip(a.tolist(), a.tolist()))
+        elif a.ndim == 2 and a.shape[1] == 2:
+            pairs = [(float(l), float(r)) for l, r in a]
+        else:
+            # Defensive: flatten anything else as mono so we don't drop
+            # audio silently on an unexpected shape.
+            flat = a.reshape(-1)
+            pairs = list(zip(flat.tolist(), flat.tolist()))
         with self._tx_audio_lock:
-            self._tx_audio.extend(audio.tolist())
+            self._tx_audio.extend(pairs)
 
     def clear_tx_audio(self):
         """Drain any pending samples from the TX audio queue. Called
@@ -355,6 +458,14 @@ class HL2Stream:
             self.stats.frames += 1
             self.stats.samples += samples.shape[0]
             self.stats.last_c1_c4 = cc1
+
+            # Fold both C&C blocks into the rolling telemetry slots.
+            # Each EP6 frame carries two C&C blocks and the radio
+            # rotates the C0 telemetry address across blocks AND
+            # frames — hitting both blocks here halves the latency
+            # to the next refresh of any given field.
+            _decode_hl2_telemetry(cc0, self.stats)
+            _decode_hl2_telemetry(cc1, self.stats)
 
             on_samples(samples, self.stats)
 

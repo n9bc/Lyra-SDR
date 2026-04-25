@@ -390,6 +390,10 @@ class ViewPanel(GlassPanel):
         h.setSpacing(6)
 
         # Zoom combo — same preset levels as Settings + mouse wheel.
+        # Pairs with a fine-zoom slider to its right: combo for fast
+        # preset jumps (1× / 2× / 4× / 8× / 16×), slider for in-between
+        # values (e.g. 1.5×, 2.5×, 3.7×) when the operator wants to
+        # fine-tune the panadapter span without snapping to a preset.
         h.addWidget(QLabel("Zoom"))
         self.zoom_combo = QComboBox()
         for lvl in Radio.ZOOM_LEVELS:
@@ -397,10 +401,46 @@ class ViewPanel(GlassPanel):
         self._sync_zoom_combo(radio.zoom)
         self.zoom_combo.setFixedWidth(64)
         self.zoom_combo.setToolTip(
-            "Panadapter zoom. Mouse-wheel on empty spectrum steps "
-            "through the same levels.")
+            "Panadapter zoom presets (1× / 2× / 4× / 8× / 16×).\n"
+            "Mouse-wheel on empty spectrum steps through these.\n"
+            "For in-between values, use the slider to the right.")
         self.zoom_combo.currentIndexChanged.connect(self._on_zoom_pick)
         h.addWidget(self.zoom_combo)
+
+        # Fine-zoom slider — linear 1.0× .. 16.0× in 0.1× ticks.
+        # Internal slider int = zoom × 10 so we don't need a custom
+        # double-slider widget. Same ZOOM_MIN..MAX bounds as the
+        # combo's first/last preset, so anything reachable here is
+        # also a valid Radio.set_zoom() value.
+        self.zoom_slider = QSlider(Qt.Horizontal)
+        self.zoom_slider.setObjectName("zoom_slider")
+        self.zoom_slider.setRange(10, 160)         # 1.0x .. 16.0x
+        self.zoom_slider.setSingleStep(1)          # 0.1x per arrow tick
+        self.zoom_slider.setPageStep(5)            # 0.5x per PgUp/PgDn
+        self.zoom_slider.setValue(int(round(radio.zoom * 10)))
+        self.zoom_slider.setFixedWidth(110)
+        self.zoom_slider.setToolTip(
+            "Fine zoom — drag for any value between 1.0× and 16.0×\n"
+            "in 0.1× steps. Useful when a preset is too coarse\n"
+            "(e.g. 1.5× to fit a SSB QSO without overshooting to 2×,\n"
+            "or 3× to span a CW pile-up).\n\n"
+            "The combo on the left snaps to the standard presets;\n"
+            "this slider freely rides between them. Either control\n"
+            "drives the same Radio.zoom — mouse-wheel on the\n"
+            "spectrum still uses preset steps.")
+        self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
+        h.addWidget(self.zoom_slider)
+
+        # Live readout next to the slider — "1.7x" — so the operator
+        # always sees the current value without having to read pixel
+        # positions. Same monospace styling as other live readouts on
+        # this row.
+        self.zoom_label = QLabel(f"{radio.zoom:.1f}x")
+        self.zoom_label.setFixedWidth(40)
+        self.zoom_label.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace; "
+            "font-weight: 700;")
+        h.addWidget(self.zoom_label)
 
         # Spectrum rate — compact slider only; live value is in the
         # tooltip on hover. Operator wanted a thin panel with no
@@ -515,6 +555,19 @@ class ViewPanel(GlassPanel):
     def _on_zoom_pick(self, _idx: int):
         self.radio.set_zoom(float(self.zoom_combo.currentData()))
 
+    def _on_zoom_slider(self, v: int):
+        """Fine-zoom slider drag — slider int = zoom × 10."""
+        zoom = max(1.0, min(16.0, v / 10.0))
+        # Snap to a preset when the slider lands within ±0.05× of one
+        # so the combo + slider feel coupled (otherwise the combo
+        # caption stays "1x" while the slider sits at 1.7x and the
+        # operator wonders which value is authoritative).
+        for preset in Radio.ZOOM_LEVELS:
+            if abs(zoom - preset) <= 0.05:
+                zoom = preset
+                break
+        self.radio.set_zoom(zoom)
+
     def _on_fps_changed(self, fps: int):
         self.radio.set_spectrum_fps(fps)
         self._refresh_fps_tooltip(fps)
@@ -529,6 +582,14 @@ class ViewPanel(GlassPanel):
     # ── radio-driven (e.g. wheel-zoom, Visuals tab slider) ───────
     def _on_radio_zoom_changed(self, zoom: float):
         self._sync_zoom_combo(zoom)
+        # Keep the fine-zoom slider + label in sync without firing
+        # our own valueChanged handler (would loop back into Radio).
+        target = int(round(zoom * 10))
+        if self.zoom_slider.value() != target:
+            self.zoom_slider.blockSignals(True)
+            self.zoom_slider.setValue(target)
+            self.zoom_slider.blockSignals(False)
+        self.zoom_label.setText(f"{zoom:.1f}x")
 
     def _on_radio_fps_changed(self, fps: int):
         if self.fps_slider.value() != fps:
@@ -753,6 +814,78 @@ class DspPanel(GlassPanel):
         self.vol_label.setFixedWidth(50)
         levels.addWidget(self.vol_label)
 
+        levels.addSpacing(12)
+
+        # Balance slider — stereo pan from full-left to full-right.
+        # Slider range is -100..+100 (center 0) so 1 tick = 1% pan
+        # offset, with a reset-to-center via double-click.
+        # Equal-power pan law lives in Radio.balance_lr_gains so the
+        # perceived loudness stays constant as the operator sweeps
+        # the pan across center.
+        # FUTURE: when RX2 / Split arrive, this becomes the RX1
+        # balance and a second slider (and a routing-mode picker)
+        # joins it for RX2.
+        levels.addWidget(QLabel("Bal"))
+        self.bal_slider = QSlider(Qt.Horizontal)
+        self.bal_slider.setObjectName("bal_slider")
+        self.bal_slider.setRange(-100, 100)
+        self.bal_slider.setSingleStep(1)
+        self.bal_slider.setPageStep(10)
+        self.bal_slider.setValue(int(round(radio.balance * 100)))
+        self.bal_slider.setFixedWidth(120)
+        # Visible tick marks under the slider so the operator can see
+        # where center is at a glance — interval 50 gives ticks at
+        # L100, L50, C, R50, R100. Combined with the snap-deadzone in
+        # _on_bal_slider, sweeping through center "clicks" into true
+        # zero and the label shows "C" so there's tactile + visual +
+        # textual confirmation the audio is mono-balanced.
+        self.bal_slider.setTickPosition(QSlider.TicksBelow)
+        self.bal_slider.setTickInterval(50)
+        self.bal_slider.setToolTip(
+            "Stereo balance — pan the audio between left and right.\n"
+            "Center = both ears equal (label reads 'C').\n\n"
+            "Tick marks: L100 / L50 / Center / R50 / R100.\n"
+            "Sweeping near center auto-snaps to true zero (±3% deadzone)\n"
+            "so the slider 'clicks into' mono without you having to aim.\n\n"
+            "Double-click anywhere on the slider to instantly recenter.\n\n"
+            "Useful for DX-split listening (when RX2 ships) and for A/B\n"
+            "against a noise source in one channel.")
+        self.bal_slider.valueChanged.connect(self._on_bal_slider)
+        # Double-click recenters — kept as the precise gesture even
+        # though the snap deadzone makes it usually unnecessary.
+        self.bal_slider.mouseDoubleClickEvent = (
+            lambda _e: self.bal_slider.setValue(0))
+        levels.addWidget(self.bal_slider)
+        self.bal_label = QLabel(self._format_bal(radio.balance))
+        self.bal_label.setFixedWidth(40)
+        # Click the "C / L37 / R12" label to recenter — third
+        # discoverable gesture for getting back to mono.
+        self.bal_label.setCursor(Qt.PointingHandCursor)
+        self.bal_label.setToolTip("Click to recenter balance to mono.")
+        self.bal_label.mousePressEvent = (
+            lambda _e: self.bal_slider.setValue(0))
+        levels.addWidget(self.bal_label)
+
+        # Sync from Radio side too (e.g. QSettings load, future TCI)
+        radio.balance_changed.connect(self._on_radio_balance_changed)
+
+        levels.addSpacing(12)
+
+        # Audio output destination — moved to the levels row as part of
+        # the Option A consolidation so the entire audio chain
+        # (LNA → AF → Vol → Bal → Out) reads left-to-right on a single
+        # row. Frees the former Row 2 for future EQ / Profile / Notch
+        # default-width controls without forcing the panel taller.
+        levels.addWidget(QLabel("Out"))
+        self.out_combo = QComboBox()
+        self.out_combo.addItems(["AK4951", "PC Soundcard"])
+        self.out_combo.setCurrentText(radio.audio_output)
+        self.out_combo.setFixedWidth(120)
+        self.out_combo.currentTextChanged.connect(self.radio.set_audio_output)
+        levels.addWidget(self.out_combo)
+
+        levels.addSpacing(12)
+
         # Mute button — Radio-side state so it survives volume slider
         # drags while muted (slider can be positioned for post-unmute
         # without breaking silence). Muting multiplies final output by
@@ -771,35 +904,15 @@ class DspPanel(GlassPanel):
         levels.addStretch(1)
         self.content_layout().addLayout(levels)
 
-        # ── Row 2 — Audio output + Notch configuration ──────────────
-        h = QHBoxLayout()
-
-        # Audio output selector
-        h.addWidget(QLabel("Out"))
-        self.out_combo = QComboBox()
-        self.out_combo.addItems(["AK4951", "PC Soundcard"])
-        self.out_combo.setCurrentText(radio.audio_output)
-        self.out_combo.setFixedWidth(120)
-        self.out_combo.currentTextChanged.connect(self.radio.set_audio_output)
-        h.addWidget(self.out_combo)
-
-        h.addSpacing(14)
-
-        # Notch bank — no dedicated "Notch" button here anymore. The
-        # NF button in the DSP row below is the single source of
-        # truth for enable/disable. Having TWO buttons on the same
-        # Radio.set_notch_enabled toggle was confusing (they both lit
-        # together, which looked like duplicated feedback). We keep
-        # only the compact live counter here so the operator can see
-        # how many notches are active without looking down at the
-        # DSP row.
-        # Full gesture hints live on the NF button's tooltip (see the
-        # DSP row below) and are mirrored onto this counter.
-        self.notch_info = QLabel("0 notches")
-        self.notch_info.setMinimumWidth(120)
+        # Notch tooltip text — shared by the NF button on the DSP row
+        # below AND the notch_info counter that sits next to it. Defined
+        # here once so both references stay in sync. Counter + button
+        # lived on a dedicated Row 2 originally; Option A consolidation
+        # collapsed that row into the levels row above + the DSP row
+        # below to recover vertical space.
         self._notch_tooltip = (
             "Notch Filter — manual per-frequency notches.\n"
-            "Toggle on/off via the NF button on the DSP row below.\n\n"
+            "Toggle on/off via the NF button on this DSP row.\n\n"
             "On the spectrum or waterfall (NF must be ON):\n"
             "  • Right-click          — menu (Add / Disable this /\n"
             "                            Make DEEP / Remove nearest /\n"
@@ -817,11 +930,6 @@ class DspPanel(GlassPanel):
             "When NF is OFF, right-click shows a single 'Enable Notch\n"
             "Filter' item — right-click stays reserved for other\n"
             "spectrum features until you turn NF on.")
-        self.notch_info.setToolTip(self._notch_tooltip)
-        h.addWidget(self.notch_info)
-        h.addStretch(1)
-
-        self.content_layout().addLayout(h)
 
         # NOTE: there is no per-notch slider on the front panel.
         # Per-notch width is adjusted via wheel/drag over the notch
@@ -859,6 +967,18 @@ class DspPanel(GlassPanel):
         self.dsp_btns["NF"].setChecked(radio.notch_enabled)
         self.dsp_btns["NF"].toggled.connect(self.radio.set_notch_enabled)
         self.dsp_btns["NF"].setToolTip(self._notch_tooltip)
+
+        # Live notch counter — sits immediately right of the NF
+        # button so the operator's eye finds it without scanning the
+        # whole panel. Tooltip mirrors the NF button so the same
+        # gesture cheat-sheet pops on either hover target.
+        self.notch_info = QLabel("0 notches")
+        self.notch_info.setMinimumWidth(120)
+        self.notch_info.setToolTip(self._notch_tooltip)
+        self.notch_info.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace; "
+            "font-size: 10px;")
+        dsp_row.addWidget(self.notch_info)
 
         # ── NR (Noise Reduction) ─────────────────────────────────
         # Left-click  = toggle enable/disable
@@ -1020,6 +1140,54 @@ class DspPanel(GlassPanel):
             self.vol_slider.blockSignals(True)
             self.vol_slider.setValue(target)
             self.vol_slider.blockSignals(False)
+
+    # ── Balance slider (Phase 1: pan a single mono RX across L/R) ───
+    # Future RX2 / Split expansion: when a second receiver lands, the
+    # balance model becomes "RX1 → L gain, RX2 → R gain" with a routing
+    # mode enum on Radio. The slider widget itself stays the same
+    # control surface — only the meaning of the gains shifts upstream.
+    @staticmethod
+    def _format_bal(b: float) -> str:
+        # b ∈ [-1, +1] → "L100", "C", "R37" etc.
+        if abs(b) < 0.01:
+            return "C"
+        if b < 0:
+            return f"L{int(round(-b * 100))}"
+        return f"R{int(round(b * 100))}"
+
+    # Deadzone (in slider ticks, ±) that snaps the slider back to true
+    # zero when the operator sweeps through center. Small enough that a
+    # deliberate L3% pan is still reachable; large enough that aiming for
+    # mono doesn't require pixel-perfect placement.
+    _BAL_CENTER_SNAP_TICKS = 3
+
+    def _on_bal_slider(self, slider_val: int):
+        """User dragged the Balance slider → push to Radio.
+        If we're inside the center-snap deadzone, force the slider
+        widget back to 0 so the operator gets a "clicks into mono"
+        feel and the label cleanly reads "C"."""
+        v = int(slider_val)
+        if -self._BAL_CENTER_SNAP_TICKS <= v <= self._BAL_CENTER_SNAP_TICKS \
+                and v != 0:
+            # Re-enter this handler with v=0 — block signals on the
+            # second pass to prevent infinite recursion.
+            self.bal_slider.blockSignals(True)
+            self.bal_slider.setValue(0)
+            self.bal_slider.blockSignals(False)
+            v = 0
+        b = max(-100, min(100, v)) / 100.0
+        self.bal_label.setText(self._format_bal(b))
+        self.radio.set_balance(b)
+
+    def _on_radio_balance_changed(self, b: float):
+        """Radio balance changed elsewhere (QSettings load, future
+        TCI/CAT) — keep slider + label in sync without re-firing."""
+        target = int(round(max(-1.0, min(1.0, float(b))) * 100))
+        self.bal_label.setText(self._format_bal(b))
+        if self.bal_slider.value() != target:
+            self.bal_slider.blockSignals(True)
+            self.bal_slider.setValue(target)
+            self.bal_slider.blockSignals(False)
 
     def _on_af_gain_db_changed(self, db: int):
         """Radio AF Gain changed elsewhere — keep slider + label in
@@ -1405,7 +1573,7 @@ def _build_notch_menu(parent_widget, radio, freq_hz: float) -> QMenu:
 
     # Default-width submenu (replaces the old default-Q one). Width
     # is in Hz so operators don't need to mentally translate Q values
-    # — matches Thetis / ExpertSDR3's parameter choice. Presets
+    # — the typical SDR-client parameter choice. Presets
     # cover common use cases from "narrow CW notch" up to "broadcast
     # splatter blanket".
     menu.addSeparator()

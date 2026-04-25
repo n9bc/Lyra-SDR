@@ -11,6 +11,23 @@ numpy>=1.23,<3          # IQ buffers, FFT, AGC math
 scipy>=1.10             # FIR/IIR filter design, signal processing
 sounddevice>=0.4.6      # PortAudio output (PC Soundcard sink)
 websockets>=11.0        # TCI v1.9 server (logger / DX cluster integration)
+psutil>=5.9             # process CPU% indicator on the toolbar
+                        # (Lyra runs without it, but the CPU readout
+                        #  stays "--%" until psutil is installed)
+
+# ── Optional ─────────────────────────────────────────────────────
+# NVIDIA GPU utilization indicator on the toolbar. Lyra runs fine
+# without it; the GPU readout will display "n/a" until installed.
+# AMD / Intel GPUs aren't supported by NVML — that's an OS/vendor
+# limitation, not a Lyra one.
+nvidia-ml-py>=12.0      # modern, non-deprecated package; provides
+                        # `import pynvml` for compatibility
+
+# Cross-vendor (NVIDIA / AMD / Intel) GPU readout via Windows
+# Performance Counters. Without it, AMD / Intel GPU users will see
+# "GPU n/a" on the toolbar. NVIDIA users get the readout via
+# nvidia-ml-py above either way. Windows-only; ignored on other OSes.
+pywin32>=305 ; sys_platform == "win32"
 
 # ── Optional ─────────────────────────────────────────────────────
 # Only needed if you use a USB-BCD cable to drive an external linear
