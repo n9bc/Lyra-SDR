@@ -222,6 +222,14 @@ class HL2Stream:
         with self._tx_audio_lock:
             self._tx_audio.extend(audio.tolist())
 
+    def clear_tx_audio(self):
+        """Drain any pending samples from the TX audio queue. Called
+        by AK4951Sink on init/close to prevent stale audio from a
+        previous session leaking into a new session — the symptom
+        was "digitized robotic" sound right after switching sinks."""
+        with self._tx_audio_lock:
+            self._tx_audio.clear()
+
     def _send_cc(self, c0: int, c1: int, c2: int, c3: int, c4: int):
         """Send one C&C write via EP2. Thread-safe."""
         if self._sock is None:

@@ -108,6 +108,7 @@ class Radio(QObject):
     notch_enabled_changed = Signal(bool)
     notch_default_width_changed = Signal(float)   # default width for new notches, in Hz
     audio_output_changed = Signal(str)
+    pc_audio_device_changed = Signal(object)   # int index, or None for auto
     ip_changed           = Signal(str)
 
     # ── Streaming data signals ─────────────────────────────────────────
@@ -282,6 +283,11 @@ class Radio(QObject):
         self._tx_bw_by_mode = dict(self.BW_DEFAULTS)
         self._bw_locked = False
         self._audio_output = "AK4951"
+        # Optional explicit PortAudio device index for the PC Soundcard
+        # sink. None means "auto-pick" (prefers WASAPI default — see
+        # SoundDeviceSink). Operators can override via Settings →
+        # Audio → Output device. Persisted by app.py QSettings.
+        self._pc_audio_device_index: Optional[int] = None
 
         # ── Config register (C0=0x00) — composed full ──────────────────
         # C1: sample rate bits[1:0]
@@ -1762,10 +1768,30 @@ class Radio(QObject):
         # automatic fallback logic in set_rate (so if they later bump
         # rate above 48k we know to auto-restore AK4951 afterward).
         self._preferred_audio_output = output
+        # Sink-swap cleanup. THREE things have to happen, in order,
+        # to prevent the "digitized robotic" sound right after a
+        # swap (caused by stale samples from the OLD sink leaking
+        # into the NEW one):
+        #   1. Close old sink — drains internal buffers (AK4951 also
+        #      clears the HL2 stream's TX queue per its close()).
+        #   2. Drop in-flight demod chunks (_audio_buf) that were
+        #      queued for the old sink at potentially the wrong
+        #      sample rate / format expectations.
+        #   3. Build new sink. PortAudio close → reopen on the same
+        #      physical device sometimes races; a tiny sleep gives
+        #      Windows the moment it needs to release exclusive-use
+        #      handles before we ask for them again.
         try:
             self._audio_sink.close()
         except Exception:
             pass
+        self._audio_buf.clear()
+        # 30 ms — long enough for PortAudio/WASAPI to fully release
+        # the device handle, short enough to be imperceptible to the
+        # operator. Tested across AK4951↔PC swaps with no recurrence
+        # of the robotic-sound symptom.
+        import time as _time
+        _time.sleep(0.030)
         self._audio_sink = self._make_sink() if self._stream else NullSink()
         self.audio_output_changed.emit(output)
 
@@ -2135,11 +2161,39 @@ class Radio(QObject):
             self.status_message.emit(f"Notch error: {e}", 3000)
             return None
 
+    @property
+    def pc_audio_device_index(self):
+        return self._pc_audio_device_index
+
+    def set_pc_audio_device_index(self, device):
+        """Set the PortAudio device index for the PC Soundcard sink.
+        None = auto (WASAPI default). Triggers a sink rebuild if PC
+        Soundcard is currently active so the change takes effect
+        immediately."""
+        new_dev = None if device is None else int(device)
+        if new_dev == self._pc_audio_device_index:
+            return
+        self._pc_audio_device_index = new_dev
+        self.pc_audio_device_changed.emit(new_dev)
+        # If PC Soundcard is the active sink, rebuild it so the new
+        # device choice takes effect right away. Same swap-cleanup
+        # treatment as set_audio_output.
+        if self._audio_output != "AK4951" and self._stream:
+            try:
+                self._audio_sink.close()
+            except Exception:
+                pass
+            self._audio_buf.clear()
+            import time as _time
+            _time.sleep(0.030)
+            self._audio_sink = self._make_sink()
+
     def _make_sink(self):
         if self._audio_output == "AK4951":
             return AK4951Sink(self._stream)
         try:
-            return SoundDeviceSink(rate=48000)
+            return SoundDeviceSink(
+                rate=48000, device=self._pc_audio_device_index)
         except Exception as e:
             self.status_message.emit(f"Audio output error: {e}", 6000)
             return NullSink()

@@ -19,10 +19,22 @@ class AudioSink(Protocol):
 
 
 class AK4951Sink:
-    """Route audio to the HL2's AK4951 line-level output via EP2 TX slots."""
+    """Route audio to the HL2's AK4951 line-level output via EP2 TX slots.
+
+    Sink-swap cleanup: the underlying HL2Stream owns a TX audio
+    queue (deque) that's NOT per-sink — it's a long-lived buffer
+    shared across sink swaps. We clear it on both init AND close,
+    so swapping to/from this sink doesn't leak stale samples between
+    sessions ("digitized robotic" symptom: old samples + new samples
+    interleaved in the EP2 frames).
+    """
 
     def __init__(self, stream):
         self._stream = stream
+        # Drain any leftover TX audio from a previous session before
+        # we start enqueuing fresh samples.
+        if hasattr(stream, "clear_tx_audio"):
+            stream.clear_tx_audio()
         self._stream.inject_audio_tx = True
 
     def write(self, audio: np.ndarray) -> None:
@@ -32,6 +44,12 @@ class AK4951Sink:
 
     def close(self) -> None:
         self._stream.inject_audio_tx = False
+        # Clear the queue on close so the NEXT sink (PC Soundcard
+        # or another AK4951 instance) starts from a known empty
+        # state. Without this, residual samples in the deque continue
+        # being pulled by EP2 framing for up to ~1 second.
+        if hasattr(self._stream, "clear_tx_audio"):
+            self._stream.clear_tx_audio()
 
 
 class SoundDeviceSink:

@@ -853,6 +853,145 @@ class DspSettingsTab(QWidget):
         self.action_label.setText(f"{action_db:+.1f} dB")
 
 
+class AudioSettingsTab(QWidget):
+    """Audio output configuration.
+
+    Currently hosts the PC Soundcard device picker. Grows over time
+    as more audio knobs land (output channel routing, balance,
+    per-output gain trim, etc.) — anything that's "where does my
+    audio go and how is it shaped before the speakers" belongs here,
+    distinct from the DSP tab which is about signal processing.
+    """
+
+    def __init__(self, radio, parent=None):
+        super().__init__(parent)
+        self.radio = radio
+
+        v = QVBoxLayout(self)
+
+        # ── Output sink selector (AK4951 vs PC Soundcard) ──────────
+        # Mirror of the "Out" combo on the DSP+Audio panel — exposed
+        # here so operators looking under Settings → Audio find it.
+        grp_sink = QGroupBox("Output sink")
+        gs = QHBoxLayout(grp_sink)
+        gs.addWidget(QLabel("Send audio to:"))
+        self._sink_combo = QComboBox()
+        self._sink_combo.addItems(["AK4951", "PC Soundcard"])
+        self._sink_combo.setCurrentText(radio.audio_output)
+        self._sink_combo.setMinimumWidth(180)
+        self._sink_combo.currentTextChanged.connect(radio.set_audio_output)
+        gs.addWidget(self._sink_combo)
+        gs.addStretch(1)
+        sink_help = QLabel(
+            "AK4951 = HL2's onboard codec (line-out jack on the board).\n"
+            "PC Soundcard = your computer's audio output."
+        )
+        sink_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
+        v.addWidget(grp_sink)
+        v.addWidget(sink_help)
+        # Keep the combo in sync if Radio changes the output elsewhere
+        # (rate-driven auto-fallback when AK4951 hits a >48k stream).
+        radio.audio_output_changed.connect(
+            lambda o: self._sink_combo.setCurrentText(o)
+            if self._sink_combo.currentText() != o else None
+        )
+
+        # ── Output device (PC Soundcard sink) ──────────────────────
+        grp_dev = QGroupBox("Output device — PC Soundcard sink")
+        gd = QVBoxLayout(grp_dev)
+
+        info = QLabel(
+            "Lyra normally auto-picks the WASAPI default output device.\n"
+            "Override here if your audio routes through a non-default\n"
+            "card (USB audio interface, virtual cable, S/PDIF dongle, etc).\n"
+            "Setting takes effect immediately when PC Soundcard is the\n"
+            "active sink. Has no effect when AK4951 is selected."
+        )
+        info.setStyleSheet("color: #8a9aac; font-size: 10px;")
+        gd.addWidget(info)
+
+        self._dev_combo = QComboBox()
+        self._dev_combo.setMinimumWidth(420)
+        gd.addWidget(self._dev_combo)
+
+        # Refresh + status row
+        row = QHBoxLayout()
+        self._dev_status = QLabel("")
+        self._dev_status.setStyleSheet("color: #6a7a8c; font-size: 10px;")
+        row.addWidget(self._dev_status, 1)
+        refresh_btn = QPushButton("Refresh device list")
+        refresh_btn.setFixedWidth(150)
+        refresh_btn.clicked.connect(self._populate_devices)
+        row.addWidget(refresh_btn)
+        gd.addLayout(row)
+
+        v.addWidget(grp_dev)
+        v.addStretch(1)
+
+        # Initial population. Done after layout so the combo is sized
+        # before items are added (prevents combo width jump).
+        self._populate_devices()
+
+        # When Radio changes the device elsewhere (QSettings load,
+        # future TCI control), reflect it here.
+        radio.pc_audio_device_changed.connect(self._sync_to_radio)
+
+    def _populate_devices(self):
+        """Enumerate PortAudio output devices via sounddevice. Lists
+        all hostapis (MME, DirectSound, WASAPI, WDM-KS) so the
+        operator can pick a specific backend if they want to override
+        Lyra's WASAPI-default preference."""
+        self._dev_combo.blockSignals(True)
+        self._dev_combo.clear()
+        # First entry is always "Auto (WASAPI default)" — the safe
+        # default. userData=None signals "let SoundDeviceSink pick".
+        self._dev_combo.addItem("Auto  (WASAPI default — recommended)", None)
+        try:
+            import sounddevice as sd
+            devices = sd.query_devices()
+            for idx, dev in enumerate(devices):
+                if dev.get("max_output_channels", 0) <= 0:
+                    continue
+                ha_name = sd.query_hostapis(dev["hostapi"])["name"]
+                rate = int(dev.get("default_samplerate", 0))
+                ch = dev.get("max_output_channels", 0)
+                label = (f"[{idx:>3}] {dev['name']}   "
+                         f"({ha_name}, {ch}ch, {rate} Hz)")
+                self._dev_combo.addItem(label, idx)
+            self._dev_status.setText(
+                f"{self._dev_combo.count() - 1} output device(s) detected"
+            )
+        except Exception as e:
+            self._dev_status.setText(f"Device enumeration failed: {e}")
+        self._sync_to_radio(self.radio.pc_audio_device_index)
+        self._dev_combo.blockSignals(False)
+        # Connect AFTER initial population so the sync above doesn't
+        # trigger a spurious Radio.set call. Only connect once;
+        # subsequent Refresh button clicks just rebuild the items.
+        if not getattr(self, "_signal_connected", False):
+            self._dev_combo.currentIndexChanged.connect(self._on_device_picked)
+            self._signal_connected = True
+
+    def _sync_to_radio(self, current_idx):
+        """Set the combo selection to match Radio's current device.
+        Called on initial populate and whenever Radio emits
+        pc_audio_device_changed."""
+        target = -1
+        for i in range(self._dev_combo.count()):
+            if self._dev_combo.itemData(i) == current_idx:
+                target = i
+                break
+        if target < 0:
+            target = 0          # fall back to "Auto"
+        if self._dev_combo.currentIndex() != target:
+            self._dev_combo.setCurrentIndex(target)
+
+    def _on_device_picked(self, combo_idx: int):
+        device = self._dev_combo.itemData(combo_idx)
+        # device is None for "Auto", or an int for a specific index.
+        self.radio.set_pc_audio_device_index(device)
+
+
 class VisualsSettingsTab(QWidget):
     """Spectrum + waterfall display options.
 
@@ -1595,10 +1734,13 @@ class SettingsDialog(QDialog):
         self.tab_dsp = DspSettingsTab(radio)
         self.tabs.addTab(self.tab_dsp, "DSP")
 
+        self.tab_audio = AudioSettingsTab(radio)
+        self.tabs.addTab(self.tab_audio, "Audio")
+
         self.tab_visuals = VisualsSettingsTab(radio)
         self.tabs.addTab(self.tab_visuals, "Visuals")
 
-        for name in ("Audio", "Keyer", "Bands"):
+        for name in ("Keyer", "Bands"):
             placeholder = QLabel(f"{name} settings — coming soon.")
             placeholder.setAlignment(Qt.AlignCenter)
             placeholder.setStyleSheet("color: #5a7080; padding: 40px;")

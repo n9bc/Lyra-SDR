@@ -599,6 +599,17 @@ class MainWindow(QMainWindow):
             try: r.set_af_gain_db(int(s.value("af_gain_db")))
             except (TypeError, ValueError): pass
         if s.contains("audio_output"):  r.set_audio_output(str(s.value("audio_output")))
+        if s.contains("pc_audio_device"):
+            v = s.value("pc_audio_device")
+            try:
+                # Allow empty / "auto" / "" to mean None (auto-pick).
+                # Otherwise parse as int device index.
+                if v in (None, "", "auto", "None"):
+                    r.set_pc_audio_device_index(None)
+                else:
+                    r.set_pc_audio_device_index(int(v))
+            except (TypeError, ValueError):
+                pass
         if s.contains("bw_locked"):
             r.set_bw_lock(s.value("bw_locked") in (True, "true", "True", 1, "1"))
         if s.contains("filter_board"):
@@ -770,6 +781,12 @@ class MainWindow(QMainWindow):
         s.setValue("volume", r.volume)
         s.setValue("af_gain_db", r.af_gain_db)
         s.setValue("audio_output", r.audio_output)
+        # PC Soundcard device index — None = auto, int = specific
+        # PortAudio device. Stored as string "auto" or the int as
+        # str so QSettings round-trips cleanly across platforms.
+        s.setValue("pc_audio_device",
+                   "auto" if r.pc_audio_device_index is None
+                   else str(int(r.pc_audio_device_index)))
         s.setValue("bw_locked", r.bw_locked)
         s.setValue("filter_board", r.filter_board_enabled)
         s.setValue("usb_bcd/serial", r.usb_bcd_serial)
