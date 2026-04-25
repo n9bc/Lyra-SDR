@@ -1,5 +1,7 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
+**Current version: 0.0.2 — "Banner & Telemetry"**
+
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
 analog-look meters, a band-plan overlay with landmark click-to-tune,
@@ -11,6 +13,17 @@ and per-notch cut-depth visualization on the panadapter.
 
 Pre-alpha — RX is functional; TX is in progress. Developed and tested
 against a Hermes Lite 2+ board.
+
+The version string above is the single source of truth maintained in
+`lyra/__init__.py` and surfaces in:
+
+- The window title bar
+- The Help → About Lyra dialog
+- A permanent label on the right side of the status bar
+- The User Guide's About section (rendered live from package metadata)
+
+Bumping the version is a one-line edit in `lyra/__init__.py`; every
+display surface follows automatically.
 
 ## Features so far
 

@@ -268,6 +268,35 @@ class HelpDialog(QDialog):
         path = Path(current.data(Qt.UserRole))
         self._render(path)
 
+    # Template placeholders the help-markdown can use to embed live
+    # app metadata. Keeps user-guide pages in sync with __version__
+    # automatically — bumping lyra/__init__.py updates every doc page
+    # that references {{ version }}, {{ version_full }}, or
+    # {{ repo_url }}, no per-doc edit needed.
+    _TEMPLATE_VARS_REPO_URL = "https://github.com/N8SDR1/Lyra-SDR"
+
+    def _expand_template(self, md: str) -> str:
+        """Substitute {{ var }} placeholders with current app metadata.
+
+        Supported placeholders:
+          {{ version }}       e.g. "0.0.2"
+          {{ version_full }}  e.g. "0.0.2 — Banner & Telemetry (dev build)"
+          {{ repo_url }}      "https://github.com/N8SDR1/Lyra-SDR"
+
+        Unknown placeholders are left untouched so a typo in a
+        markdown file is visible at render time rather than silently
+        becoming an empty string.
+        """
+        from lyra import __version__, version_string
+        replacements = {
+            "{{ version }}":      __version__,
+            "{{ version_full }}": version_string(),
+            "{{ repo_url }}":     self._TEMPLATE_VARS_REPO_URL,
+        }
+        for key, val in replacements.items():
+            md = md.replace(key, val)
+        return md
+
     def _render(self, path: Path):
         try:
             md = path.read_text(encoding="utf-8")
@@ -276,6 +305,9 @@ class HelpDialog(QDialog):
                 f"# Could not read `{path.name}`\n\n"
                 f"```\n{e}\n```")
             return
+        # Live placeholder substitution so version / repo URL stay
+        # in sync with the package metadata on every render.
+        md = self._expand_template(md)
         # Set a search path so `![](../../assets/logo/xxx.png)` style
         # relative image links resolve cleanly. QTextBrowser resolves
         # image URLs against searchPaths() + the current markdown's

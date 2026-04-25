@@ -49,19 +49,27 @@ up changes.
 
 ## About
 
-Version: 0.x (alpha, under active development)
-Project: [github.com](https://github.com/)  *(update URL)*
-Built on: PySide6 / Qt6, NumPy, SciPy, sounddevice
+**Version:** {{ version_full }}
+**Project:** [{{ repo_url }}]({{ repo_url }})
+**Built on:** PySide6 / Qt6, NumPy, SciPy, sounddevice
+
+The version string above is rendered live from the running app, so
+this page always shows the build you launched — handy for
+attaching to bug reports.
 
 ## License
 
 Lyra is released under the **MIT License**.
 See the `LICENSE` file at the project root for the full terms.
 
-Third-party dependencies and design references are documented in
-`NOTICE.md`. In particular: Lyra is **not** derived from Thetis (the
-openHPSDR reference client) or ExpertSDR3 source code — those projects
-are cited only as design
-references and protocol cross-checks. If you find anything in
-Lyra that appears to copy code from a third-party project, please
-file an issue so it can be investigated.
+Lyra is an independent, clean-room implementation. The code is
+not derived from any other SDR client's source. Other established
+HL2 client programs are referenced only as protocol cross-checks
+during development. If you find anything in Lyra that appears to
+copy code from a third-party project, please file an issue so it
+can be investigated.
+
+The TCI server protocol implemented by Lyra (Help → Settings →
+Network/TCI) was created and is maintained by EESDR Expert
+Electronics as an open specification; Lyra implements it from the
+public TCI v1.9 / v2.0 documentation.
