@@ -317,6 +317,25 @@ class MainWindow(QMainWindow):
             # Each dock provides a pre-wired QAction to toggle visibility
             view_menu.addAction(dock.toggleViewAction())
         view_menu.addSeparator()
+
+        # Lock panels — when ON, every dock loses its movable / floatable /
+        # closable bits so the operator can't accidentally drag a panel
+        # off-position or close one in the middle of operating. Resize
+        # between adjacent panels still works (those are QMainWindow
+        # separators, not per-dock features). State persists in
+        # QSettings under view/panels_locked.
+        self.lock_panels_action = QAction("&Lock panels", self)
+        self.lock_panels_action.setCheckable(True)
+        self.lock_panels_action.setShortcut("Ctrl+L")
+        self.lock_panels_action.setToolTip(
+            "When checked, panel title bars are frozen — drag, float, "
+            "and close are disabled so panels can't be moved by accident.\n"
+            "Splitter resize between adjacent panels still works.\n"
+            "Uncheck to rearrange panels.")
+        self.lock_panels_action.toggled.connect(self._on_lock_panels_toggled)
+        view_menu.addAction(self.lock_panels_action)
+
+        view_menu.addSeparator()
         save_layout = QAction("Save current layout as my default", self)
         save_layout.setToolTip(
             "Capture the current arrangement (panel positions, sizes, "
@@ -1023,6 +1042,45 @@ class MainWindow(QMainWindow):
             "</p>"
         )
 
+    # ── Lock / unlock panels ────────────────────────────────────────
+    def _on_lock_panels_toggled(self, locked: bool):
+        """View → Lock panels — toggle dock-bar drag/float/close
+        features on every panel. When locked, panels can't be moved
+        accidentally. State is persisted to QSettings so it survives
+        across launches."""
+        if locked:
+            # Strip the moveable / floatable / closable bits but keep
+            # whatever else Qt has set (e.g. vertical-title behavior).
+            features = QDockWidget.NoDockWidgetFeatures
+        else:
+            features = (QDockWidget.DockWidgetMovable
+                        | QDockWidget.DockWidgetFloatable
+                        | QDockWidget.DockWidgetClosable)
+        for dock in self.docks.values():
+            dock.setFeatures(features)
+        self._settings.setValue("view/panels_locked", bool(locked))
+        self._settings.sync()
+        # Brief status-bar toast so the operator sees the toggle
+        # took effect (the title-bar visual change is subtle).
+        self.statusBar().showMessage(
+            "Panels locked — Ctrl+L to unlock"
+            if locked else
+            "Panels unlocked — drag freely",
+            2500)
+
+    def _apply_panels_lock_from_settings(self):
+        """Read the persisted lock state and apply on launch.
+        Called from _load_settings()."""
+        locked = self._settings.value(
+            "view/panels_locked", False, type=bool)
+        # Set the action's checked state without firing the toggled
+        # signal (we'll apply via the helper directly to avoid the
+        # double-trip through the setter).
+        self.lock_panels_action.blockSignals(True)
+        self.lock_panels_action.setChecked(bool(locked))
+        self.lock_panels_action.blockSignals(False)
+        self._on_lock_panels_toggled(bool(locked))
+
     # ── Settings backup / import / export ────────────────────────────
     def _on_export_settings(self):
         """File → Export settings… — save the QSettings namespace to a
@@ -1582,6 +1640,10 @@ class MainWindow(QMainWindow):
         split_state = s.value("center_split")
         if isinstance(split_state, QByteArray) and not split_state.isEmpty():
             self.center_splitter.restoreState(split_state)
+        # Re-apply the panel-lock state so the operator's preference
+        # carries over a restart. Done AFTER restoreState() so the
+        # docks exist and have their default features set first.
+        self._apply_panels_lock_from_settings()
         # ── TCI settings ─────────────────────────────────────────────
         tci = self.pnl_tci.server
         if s.contains("tci/port"):

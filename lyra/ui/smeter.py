@@ -747,33 +747,75 @@ class LitArcMeter(QWidget):
 
     def _build_geometry(self):
         """Compute arc segment polygons + scale tick positions ONCE per
-        size change. Called lazily from paint() when geom_dirty."""
+        size change. Called lazily from paint() when geom_dirty.
+
+        Auto-centers the arc within the available drawing area:
+        the radius is bounded by BOTH the horizontal and vertical
+        room left after the mode chips + scale-label margin + readout
+        strip are reserved. Whichever bound is tighter wins, then the
+        resulting crescent is centered in the leftover space so the
+        meter never gets clipped at small panel sizes.
+        """
         from PySide6.QtCore import QPointF
         w, h = self.width(), self.height()
-        # Reserve top strip for the mode labels, bottom for the readout
+        # Reserve top strip for the mode labels, bottom for the readout.
         mode_strip_h    = 22
         readout_strip_h = 30
-        arc_top    = mode_strip_h
+        # Vertical room reserved OUTSIDE the segments for scale labels
+        # (which are drawn outside R_outer) — needs to come off the
+        # top of the arc area before we compute the available depth.
+        label_reserve   = 14
+        arc_top    = mode_strip_h + label_reserve
         arc_bottom = h - readout_strip_h - 6
 
-        # Pivot well below the visible arc to make the arc appear
-        # gently curved rather than a tight half-circle.
         usable_w = max(60, w - 2 * self.SIDE_MARGIN_PX)
         usable_h = max(40, arc_bottom - arc_top)
-        # Outer radius derived so the arc spans usable_w at its widest
-        sweep = math.radians(self.SWEEP_HALF_DEG)
-        # half-width of arc at outer radius = R * sin(sweep)
-        # we want that = usable_w/2
-        R_outer = (usable_w / 2.0) / math.sin(sweep)
-        # arc top is at center.y - R*cos(sweep), and we want it == arc_top
-        center_x = w / 2.0
-        center_y = arc_top + R_outer * math.cos(sweep)
 
-        # Segment thickness — about 14 px deep
-        seg_thick = 16.0
+        sweep   = math.radians(self.SWEEP_HALF_DEG)
+        sin_sw  = math.sin(sweep)
+        cos_sw  = math.cos(sweep)
+
+        # Two radius bounds — pick the tighter so the arc never
+        # overflows in either dimension.
+        #
+        # Width bound: the rightmost scale LABEL center sits at
+        #   center_x + R_label · sin(sweep)
+        # and the label text adds LABEL_TEXT_HALF_WIDTH_PX past that.
+        # We compute the bound against label position (not segment
+        # position) because labels are what hangs off the widget
+        # edge first — the segments themselves are well inside.
+        #
+        # Depth bound: arc visible depth = R · (1 − cos(sweep))
+        LABEL_RADIAL_OFFSET    = 11.0   # how far labels sit OUTSIDE R_outer
+        LABEL_TEXT_HALF_WIDTH  = 14.0   # widest label (e.g. '+30') ≈ 24 px
+        # Solve label-edge ≤ usable_w/2 for R_outer:
+        #   (R_outer + LABEL_RADIAL_OFFSET) · sin_sw + LABEL_TEXT_HALF_WIDTH
+        #     ≤ usable_w / 2
+        if sin_sw > 0:
+            R_max_horiz = ((usable_w / 2.0 - LABEL_TEXT_HALF_WIDTH) / sin_sw
+                           - LABEL_RADIAL_OFFSET)
+        else:
+            R_max_horiz = usable_w
+        R_max_vert  = usable_h / max(1e-3, 1.0 - cos_sw)
+        R_outer     = max(40.0, min(R_max_horiz, R_max_vert))
+
+        # Center the visible-arc crescent in the available space.
+        # The crescent's vertical extent is R*(1-cos(sweep)); place
+        # its top edge so the crescent sits centered between
+        # arc_top and arc_bottom.
+        arc_depth   = R_outer * (1.0 - cos_sw)
+        crescent_top_y = arc_top + (usable_h - arc_depth) / 2.0
+        # The pivot lies R_outer below the topmost point of the arc
+        # (which is at angle 0 = straight up); equivalently, R*cos(sweep)
+        # below the bottom edge of the crescent at the side angles.
+        center_x = w / 2.0
+        center_y = crescent_top_y + R_outer
+
+        # Segment thickness scales with arc radius so it looks right
+        # at any panel size from compact (R~80) to large (R~250).
+        seg_thick = max(8.0, min(20.0, R_outer * 0.10))
         R_inner = R_outer - seg_thick
-        # Scale labels live OUTSIDE the segments
-        R_label = R_outer + 12.0
+        R_label = R_outer + LABEL_RADIAL_OFFSET
 
         # Build segment polygons. Each is a small wedge between two
         # angles, from R_inner to R_outer.
