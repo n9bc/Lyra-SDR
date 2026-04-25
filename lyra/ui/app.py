@@ -33,7 +33,13 @@ from lyra.ui.help_dialog import HelpDialog
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Lyra — Hermes Lite 2+ SDR Transceiver")
+        # Title bar carries the version so the operator can see at a
+        # glance which build they're running — useful when triaging
+        # bug reports (the tester might be on an older build than
+        # they think).
+        from lyra import __version__ as _ver
+        self.setWindowTitle(
+            f"Lyra v{_ver} — Hermes Lite 2+ SDR Transceiver")
         # App icon — shows in the window title bar, taskbar button,
         # Alt+Tab preview, and the rounded "pin to start" tile on
         # Windows 11. Loaded from the multi-res .ico so Windows picks
@@ -108,6 +114,20 @@ class MainWindow(QMainWindow):
         # Status bar driven by Radio signals
         self.radio.status_message.connect(
             lambda text, timeout: self.statusBar().showMessage(text, timeout))
+
+        # Permanent version readout on the right side of the status
+        # bar so the operator can ALWAYS see what build they're on
+        # (handy in screenshots accompanying bug reports). Lives in
+        # the permanent-widgets area so transient status messages
+        # don't overwrite it the way they would for showMessage().
+        from lyra import __version__ as _ver, version_string as _vs
+        from PySide6.QtWidgets import QLabel as _QLabel
+        self._version_label = _QLabel(f"Lyra v{_ver}")
+        self._version_label.setToolTip(_vs())
+        self._version_label.setStyleSheet(
+            "color: #6a7a8c; font-family: Consolas, monospace; "
+            "padding: 0 8px;")
+        self.statusBar().addPermanentWidget(self._version_label)
 
         self._load_settings()
 
@@ -304,6 +324,27 @@ class MainWindow(QMainWindow):
         opengl_dialog_act.triggered.connect(
             lambda: self._show_opengl_dialog(force=True))
         help_menu.addAction(opengl_dialog_act)
+
+        help_menu.addSeparator()
+        # Check for updates — placeholder for the installer-build
+        # release pipeline. When the PyInstaller / Inno Setup work
+        # lands we'll wire this to query the GitHub Releases API for
+        # the latest tag, compare to lyra.__version__, and show a
+        # "0.0.3 available — Open release page" dialog if newer.
+        # The action is greyed out for now so operators see it exists
+        # without it firing on a not-yet-implemented endpoint.
+        update_act = QAction("Check for &Updates…  (coming soon)", self)
+        update_act.setEnabled(False)
+        update_act.setToolTip(
+            "Will query GitHub Releases for a newer Lyra version. "
+            "Wired up in the installer-build release.")
+        help_menu.addAction(update_act)
+
+        about_act = QAction("&About Lyra…", self)
+        about_act.setToolTip(
+            "Version, build info, repo link, and license summary.")
+        about_act.triggered.connect(self._show_about_dialog)
+        help_menu.addAction(about_act)
 
     def _build_toolbar(self):
         """Main toolbar — explicit left-to-right order:
@@ -901,6 +942,34 @@ class MainWindow(QMainWindow):
         if result == QDialog.Accepted:
             self._open_settings(tab="Visuals")
 
+    def _show_about_dialog(self):
+        """Help → About Lyra. Version, build date, repo link, license.
+
+        Pulls all version-related strings from `lyra.__init__` so this
+        dialog never goes stale relative to the package's actual
+        version — bumping `__version__` in one place updates the
+        title bar, the QApplication.applicationVersion(), and this
+        dialog at once.
+        """
+        from lyra import __version__, version_string
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.about(
+            self,
+            "About Lyra",
+            f"<h2>Lyra v{__version__}</h2>"
+            f"<p style='color:#8a9aac'>{version_string()}</p>"
+            "<p>Qt6 / PySide6 desktop SDR transceiver for the "
+            "Hermes Lite 2 / 2+.</p>"
+            "<p>Author: <b>Rick Langford (N8SDR)</b><br>"
+            "Repository: <a href='https://github.com/N8SDR1/Lyra-SDR'>"
+            "github.com/N8SDR1/Lyra-SDR</a><br>"
+            "License: MIT</p>"
+            "<p style='color:#8a9aac; font-size:10px'>"
+            "TCI server protocol © EESDR Expert Electronics, "
+            "implemented from the public TCI v1.9 / v2.0 spec."
+            "</p>"
+        )
+
     def _open_telem_probe(self):
         """Help → HL2 Telemetry Probe. Opens the diagnostic dialog
         that captures live C&C bytes and shows per-address summaries
@@ -1399,6 +1468,16 @@ def main():
         QSurfaceFormat.setDefaultFormat(fmt)
 
     app = QApplication(sys.argv)
+
+    # Application metadata — Windows uses this for taskbar grouping,
+    # AppUserModelID, "Open With" registration, and the title shown
+    # in some dialog headers. Keep in sync with lyra/__init__.py.
+    from lyra import __version__ as _lyra_version
+    app.setApplicationName("Lyra")
+    app.setApplicationDisplayName("Lyra")
+    app.setApplicationVersion(_lyra_version)
+    app.setOrganizationName("N8SDR")
+    app.setOrganizationDomain("github.com/N8SDR1/Lyra-SDR")
 
     body = QFont()
     body.setFamilies([theme.FONT_FAMILY, "Segoe UI", "Arial"])
