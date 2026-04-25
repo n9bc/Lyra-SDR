@@ -61,8 +61,43 @@ S-meter follows the standard **S1 = −121 dBm, 6 dB per S-unit**
 convention above the preamp stage. HL2 gain setting is compensated
 so S-readings are consistent across different RF gain values.
 
-A **user calibration** offset will be added to Settings (backlog item)
-for fine-tuning against a known reference signal.
+### S-meter cal trim
+
+A per-rig dB offset can be applied to the meter reading independent
+of the spectrum scale. Two ways to set it:
+
+**Settings → Visuals → Spectrum calibration → S-meter slider**
+A −40..+40 dB slider with double-click to recenter. Useful when
+you know the offset you want from prior measurement.
+
+**Right-click on the meter face → "Calibrate to current = …"**
+The fast operator workflow:
+
+1. Pipe a known-amplitude signal into the antenna (signal generator,
+   or a known reference signal on-air like WWV at 10 MHz).
+2. Right-click the meter and pick the matching reference:
+   - "Calibrate so current reads S9 (−73 dBm)"
+   - "Calibrate so current reads S5 (−97 dBm)"
+   - "Calibrate so current reads S3 (−109 dBm)"
+   - "Calibrate so current reads S1 (−121 dBm)"
+   - or **"Calibrate to specific dBm…"** for any other value
+3. The offset auto-adjusts so the next reading matches the reference.
+
+Right-click → **"Reset cal to 0 dB"** to clear the trim back to
+default. The current trim is shown in the menu so you can see what's
+applied at any time.
+
+### S-meter cal vs spectrum cal — when to use which
+
+**Spectrum cal** (Settings → Visuals → Spectrum calibration → Cal
+slider) shifts the WHOLE spectrum scale and the S-meter reading
+together. Use it to compensate for known signal-path losses
+(preselector, antenna efficiency, cable loss).
+
+**S-meter cal** shifts ONLY the meter reading, NOT the spectrum
+scale. Use it for the final S-meter calibration after spectrum cal
+is set — gets the meter to read S9 = −73 dBm without re-shifting
+the spectrum y-axis you just calibrated.
 
 ## Moving / resizing the meter
 

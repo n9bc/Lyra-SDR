@@ -1448,6 +1448,50 @@ class VisualsSettingsTab(QWidget):
         # Two-way sync — Radio can also change cal (e.g. QSettings load)
         radio.spectrum_cal_db_changed.connect(self._on_radio_cal_changed)
 
+        # ── S-meter cal (independent of spectrum cal) ──────────────
+        # Adds an offset to the smeter_level signal ONLY (so the
+        # meter dBm reading shifts), without touching the spectrum
+        # display itself. Lets the operator calibrate the S-meter
+        # against a known reference signal — e.g. inject -73 dBm
+        # from a signal generator, see what the meter reads, dial in
+        # the difference here.
+        smeter_help = QLabel(
+            "Independent dB offset added to the S-meter reading "
+            "ONLY — does not shift the spectrum scale. Use this to "
+            "calibrate the meter against a known reference signal. "
+            "Tip: right-click the meter face for a one-click "
+            "'calibrate to S9 / S5 / -73 dBm' menu.")
+        smeter_help.setWordWrap(True)
+        smeter_help.setStyleSheet("color: #b6c0cc;")
+        gc.addWidget(smeter_help, 2, 0, 1, 3)
+
+        gc.addWidget(QLabel("S-meter"), 3, 0)
+        self._smeter_cal_slider = QSlider(Qt.Horizontal)
+        self._smeter_cal_slider.setRange(
+            int(radio.SMETER_CAL_MIN_DB),
+            int(radio.SMETER_CAL_MAX_DB))
+        self._smeter_cal_slider.setValue(int(round(radio.smeter_cal_db)))
+        self._smeter_cal_slider.setTickPosition(QSlider.TicksBelow)
+        self._smeter_cal_slider.setTickInterval(10)
+        self._smeter_cal_slider.setFixedWidth(280)
+        self._smeter_cal_slider.setToolTip(
+            "S-meter cal — per-rig dB offset on the meter reading.\n\n"
+            "Independent of the spectrum cal above. Adjust this to "
+            "make S9 read -73 dBm (or whatever your reference is)\n"
+            "without re-shifting the panadapter scale.\n\n"
+            "Range: -40 to +40 dB. Default 0.\n"
+            "Double-click to snap back to zero.")
+        self._smeter_cal_slider.valueChanged.connect(self._on_smeter_cal_changed)
+        self._smeter_cal_slider.mouseDoubleClickEvent = (
+            lambda _e: self._smeter_cal_slider.setValue(0))
+        gc.addWidget(self._smeter_cal_slider, 3, 1)
+        self._smeter_cal_lbl = QLabel(f"{radio.smeter_cal_db:+.1f} dB")
+        self._smeter_cal_lbl.setFixedWidth(80)
+        self._smeter_cal_lbl.setStyleSheet(
+            "color: #cdd9e5; font-family: Consolas, monospace;")
+        gc.addWidget(self._smeter_cal_lbl, 3, 2, Qt.AlignLeft)
+        radio.smeter_cal_db_changed.connect(self._on_radio_smeter_cal_changed)
+
         v.addWidget(grp_cal)
 
         # ── Update rates + panadapter zoom ────────────────────────
@@ -1592,6 +1636,20 @@ class VisualsSettingsTab(QWidget):
             self._cal_slider.setValue(target)
             self._cal_slider.blockSignals(False)
         self._cal_lbl.setText(f"{db:+.1f} dB")
+
+    def _on_smeter_cal_changed(self, val: int):
+        """S-meter cal slider drag — push to Radio + repaint label."""
+        self._smeter_cal_lbl.setText(f"{val:+.1f} dB")
+        self.radio.set_smeter_cal_db(float(val))
+
+    def _on_radio_smeter_cal_changed(self, db: float):
+        """Radio.smeter_cal_db_changed — keep slider + label in sync."""
+        target = int(round(db))
+        if self._smeter_cal_slider.value() != target:
+            self._smeter_cal_slider.blockSignals(True)
+            self._smeter_cal_slider.setValue(target)
+            self._smeter_cal_slider.blockSignals(False)
+        self._smeter_cal_lbl.setText(f"{db:+.1f} dB")
 
     def _sync_spec_sliders(self, lo: float, hi: float):
         """Spectrum dB range changed at the Radio side (auto-scale,

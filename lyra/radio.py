@@ -140,6 +140,7 @@ class Radio(QObject):
     waterfall_palette_changed  = Signal(str)           # palette name
     spectrum_db_range_changed  = Signal(float, float)  # (min_db, max_db)
     spectrum_cal_db_changed    = Signal(float)         # operator cal trim, dB
+    smeter_cal_db_changed      = Signal(float)         # S-meter cal trim, dB
     spectrum_auto_scale_changed = Signal(bool)          # auto-fit on/off
     waterfall_db_range_changed = Signal(float, float)  # (min_db, max_db)
     # RX filter passband (for panadapter overlay) — (low_offset_hz, high_offset_hz)
@@ -583,6 +584,15 @@ class Radio(QObject):
         # Default 0 = pure theoretical dBFS based on the math above.
         # Settings → Visuals exposes a slider; persisted to QSettings.
         self._spectrum_cal_db = 0.0
+        # Independent S-meter cal trim. Applied ONLY to the
+        # smeter_level signal (so the meter dBm reading shifts), NOT
+        # to the spectrum display itself. This lets the operator
+        # calibrate the S-meter against a known reference (e.g. a
+        # signal generator at -73 dBm = S9) without re-shifting the
+        # whole panadapter scale. Default 0; settable via Settings →
+        # Visuals → "S-meter cal" or by right-click on the meter →
+        # "Calibrate to current = …".
+        self._smeter_cal_db = 0.0
         self._sample_ring: deque = deque(maxlen=self._fft_size * 4)
         self._ring_lock = threading.Lock()
 
@@ -1861,6 +1871,35 @@ class Radio(QObject):
         self._spectrum_cal_db = v
         self.spectrum_cal_db_changed.emit(v)
 
+    # ── S-meter cal trim ───────────────────────────────────────────
+    SMETER_CAL_MIN_DB = -40.0
+    SMETER_CAL_MAX_DB = +40.0
+
+    @property
+    def smeter_cal_db(self) -> float:
+        return float(self._smeter_cal_db)
+
+    def set_smeter_cal_db(self, db: float):
+        v = max(self.SMETER_CAL_MIN_DB,
+                min(self.SMETER_CAL_MAX_DB, float(db)))
+        if abs(v - self._smeter_cal_db) < 0.01:
+            return
+        self._smeter_cal_db = v
+        self.smeter_cal_db_changed.emit(v)
+
+    def calibrate_smeter_to_dbm(self, target_dbm: float,
+                                 current_meter_dbm: float):
+        """One-click S-meter calibration: 'set the meter to read
+        target_dbm given that it's currently reading current_meter_dbm
+        for the same input signal.' Computes the offset adjustment and
+        applies it on top of the existing cal.
+
+        Example: operator injects a signal generator at -73 dBm but
+        the meter shows -65 dBm → call calibrate_smeter_to_dbm(-73, -65)
+        and the cal trim shifts by -8 dB so the next reading is -73."""
+        delta = float(target_dbm) - float(current_meter_dbm)
+        self.set_smeter_cal_db(self._smeter_cal_db + delta)
+
     @property
     def spectrum_db_range(self) -> tuple[float, float]:
         return (self._spectrum_min_db, self._spectrum_max_db)
@@ -2520,7 +2559,13 @@ class Radio(QObject):
         lo = max(0, center_bin - half_bw_bins)
         hi = min(self._fft_size, center_bin + half_bw_bins)
         if hi > lo:
-            self.smeter_level.emit(float(np.max(spec_db[lo:hi])))
+            # smeter_level is the raw FFT peak inside the passband
+            # plus the operator's S-meter cal trim. Spectrum cal is
+            # already baked into spec_db at FFT time; smeter cal is
+            # additive on top so the operator can shift the meter
+            # without touching the spectrum scale.
+            peak_db = float(np.max(spec_db[lo:hi])) + self._smeter_cal_db
+            self.smeter_level.emit(peak_db)
 
         # Noise-floor estimate — 20th percentile rejects the upper 80%
         # of bins (which likely contain signals), leaving the ambient

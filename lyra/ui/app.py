@@ -1641,6 +1641,8 @@ class MainWindow(QMainWindow):
                 r.set_waterfall_db_range(*wf_range)
             if s.contains("visuals/spectrum_cal_db"):
                 r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
+            if s.contains("visuals/smeter_cal_db"):
+                r.set_smeter_cal_db(float(s.value("visuals/smeter_cal_db")))
             if s.contains("visuals/zoom"):
                 r.set_zoom(float(s.value("visuals/zoom")))
             if s.contains("visuals/spectrum_fps"):
@@ -1784,6 +1786,7 @@ class MainWindow(QMainWindow):
         s.setValue("visuals/waterfall_max_db", wf_hi)
         s.setValue("visuals/zoom",              r.zoom)
         s.setValue("visuals/spectrum_cal_db",   r.spectrum_cal_db)
+        s.setValue("visuals/smeter_cal_db",     r.smeter_cal_db)
         s.setValue("visuals/spectrum_fps",      r.spectrum_fps)
         s.setValue("visuals/waterfall_divider",   r.waterfall_divider)
         s.setValue("visuals/waterfall_multiplier", r.waterfall_multiplier)
@@ -1890,6 +1893,17 @@ def main():
     app.setFont(body)
 
     app.setStyleSheet(theme.build_stylesheet())
+
+    # Tooltip font set explicitly via QToolTip.setFont — QSS
+    # `font-size` on QToolTip is honored unreliably across Qt
+    # platform plugins (especially Windows native tooltips), so we
+    # set the QFont directly. This is the authoritative source for
+    # tooltip text size; the QSS rule is the fallback.
+    from PySide6.QtWidgets import QToolTip
+    tooltip_font = QFont()
+    tooltip_font.setFamilies([theme.FONT_FAMILY, "Segoe UI", "Arial"])
+    tooltip_font.setPointSize(11)
+    QToolTip.setFont(tooltip_font)
 
     pal = QPalette()
     pal.setColor(QPalette.Window, theme.BG_APP)

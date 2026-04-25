@@ -1624,13 +1624,25 @@ class SMeterPanel(GlassPanel):
 
         # Shared signal wiring — every meter sees every update so the
         # operator can swap styles mid-session without losing any data
-        # streams.
+        # streams. Also track the latest dBm reading locally so the
+        # right-click "Calibrate to current = X" menu can compute the
+        # correct offset relative to right-now's reading.
+        self._latest_smeter_dbm = -120.0
         radio.smeter_level.connect(self.litarc_meter.set_level_dbfs)
         radio.smeter_level.connect(self.led_meter.set_level_dbfs)
         radio.smeter_level.connect(self.analog_meter.set_level_dbfs)
+        radio.smeter_level.connect(self._track_smeter_dbm)
         radio.agc_action_db.connect(self.litarc_meter.set_agc_db)
         radio.freq_changed.connect(self._on_freq_changed)
         radio.mode_changed.connect(self.analog_meter.set_mode)
+
+        # Right-click on the meter stack → calibration menu. Wired on
+        # the QStackedWidget so it works regardless of which child
+        # meter style is currently active.
+        from PySide6.QtCore import Qt as _Qt
+        self.stack.setContextMenuPolicy(_Qt.CustomContextMenu)
+        self.stack.customContextMenuRequested.connect(
+            self._show_smeter_cal_menu)
 
         self.analog_meter.set_freq_hz(radio.freq_hz)
         self.analog_meter.set_mode(radio.mode)
@@ -1661,6 +1673,81 @@ class SMeterPanel(GlassPanel):
         self.analog_meter.set_freq_hz(hz)
         b = band_for_freq(hz)
         self.analog_meter.set_band(b.name if b else "GEN")
+
+    def _track_smeter_dbm(self, dbfs: float):
+        """Track the latest meter reading in dBm so the right-click
+        cal menu can compute the correct offset. dBfs→dBm uses the
+        same conversion the meter widgets do (-19 offset post true-
+        dBFS math fix)."""
+        self._latest_smeter_dbm = float(dbfs) + (-19.0)
+
+    def _show_smeter_cal_menu(self, pos):
+        """Right-click on the meter face → S-meter calibration menu.
+
+        Three useful workflows:
+          - Calibrate to a known reference (S9, S5, -73, -107 dBm)
+          - Reset cal to zero
+          - Open Settings → Visuals for the slider
+
+        The "calibrate to" entries call radio.calibrate_smeter_to_dbm
+        with the current reading, so the operator just clicks while
+        a known-amplitude signal is being received. Common workflow:
+          1. Pipe a signal generator at a known dBm into the antenna
+          2. Right-click the meter → "Calibrate to current = -73 dBm"
+          3. Meter cal trim auto-adjusts so the next reading matches
+        """
+        from PySide6.QtWidgets import QMenu, QInputDialog
+        menu = QMenu(self)
+        cur_dbm = self._latest_smeter_dbm
+        cur_label = f"current: {cur_dbm:+.1f} dBm"
+
+        info = menu.addAction(cur_label)
+        info.setEnabled(False)
+        menu.addSeparator()
+        # Quick presets — common references on the IARU S-meter
+        # convention (S1 = -121 dBm, 6 dB / S-unit, S9 = -73, +20 = -53).
+        for label, target_dbm in (
+            ("Calibrate so current reads S9  (-73 dBm)",   -73.0),
+            ("Calibrate so current reads S5  (-97 dBm)",   -97.0),
+            ("Calibrate so current reads S3  (-109 dBm)", -109.0),
+            ("Calibrate so current reads S1  (-121 dBm)", -121.0),
+        ):
+            act = menu.addAction(label)
+            act.triggered.connect(
+                lambda _checked=False, td=target_dbm:
+                    self.radio.calibrate_smeter_to_dbm(td, self._latest_smeter_dbm))
+
+        menu.addSeparator()
+        custom_act = menu.addAction("Calibrate to specific dBm…")
+        def _do_custom():
+            value, ok = QInputDialog.getDouble(
+                self, "S-meter calibration",
+                f"Set the meter to read this many dBm for the "
+                f"current signal\n(currently reading "
+                f"{self._latest_smeter_dbm:+.1f} dBm):",
+                self._latest_smeter_dbm, -150.0, 0.0, 1)
+            if ok:
+                self.radio.calibrate_smeter_to_dbm(
+                    value, self._latest_smeter_dbm)
+        custom_act.triggered.connect(_do_custom)
+
+        menu.addSeparator()
+        cur_cal = self.radio.smeter_cal_db
+        reset = menu.addAction(f"Reset cal to 0 dB  (currently {cur_cal:+.1f})")
+        reset.triggered.connect(lambda: self.radio.set_smeter_cal_db(0.0))
+
+        menu.addSeparator()
+        open_settings = menu.addAction("Open Visuals settings → cal sliders…")
+        # The MainWindow holds the open-settings hook; walk up the
+        # parent chain to find it. Falls back to a no-op if for some
+        # reason this panel isn't parented to a MainWindow.
+        def _open_visuals():
+            mw = self.window()
+            if hasattr(mw, "_open_settings"):
+                mw._open_settings(tab="Visuals")
+        open_settings.triggered.connect(_open_visuals)
+
+        menu.exec(self.stack.mapToGlobal(pos))
 
 
 # ── Notch context-menu builder (shared by spectrum + waterfall) ────────
