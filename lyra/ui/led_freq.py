@@ -17,11 +17,60 @@ Interactions:
 """
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QLineEdit, QSizePolicy, QWidget
 
 from . import theme
+
+
+def parse_freq_input(text: str) -> int | None:
+    """Parse a free-form frequency entry into Hz, or None if invalid.
+
+    Accepts all the formats an operator might reasonably type:
+
+      "7.074"       → 7,074,000 Hz   (single dot → MHz decimal)
+      "7,074"       → 7,074,000 Hz   (Euro decimal)
+      "7.125.000"   → 7,125,000 Hz   (multi-DOT → Hz with separators)
+      "7,074,000"   → 7,074,000 Hz   (multi-COMMA → Hz with separators)
+      "7074000"     → 7,074,000 Hz   (bare large → Hz)
+      "7074"        → 7,074,000 Hz   (bare mid-range → kHz)
+      "7"           → 7,000,000 Hz   (bare small → MHz)
+      "14.230"      → 14,230,000 Hz
+      ""            → None
+      "garbage"     → None
+
+    The multi-DOT case (matches the LED display's native MMM.kkk.hhh
+    format) is the operating-friendly path — operators see
+    "7.125.000" on the display and naturally type the same back in.
+    """
+    s = text.strip().replace(' ', '')
+    if not s:
+        return None
+    # Multiple separators (any combination of commas + dots) =
+    # thousands separators, NOT decimals. This is the LED-display-
+    # native format ("7.125.000"), the comma-separator standard
+    # ("7,074,000"), and any mixed entry an operator might type
+    # ("7,074.000"). All decode to a raw Hz integer.
+    if (s.count(',') + s.count('.')) > 1:
+        try:
+            return int(s.replace(',', '').replace('.', ''))
+        except ValueError:
+            return None
+    # Single separator: it's a DECIMAL point (MHz). Comma is the
+    # Euro-style decimal — normalize to dot before parsing.
+    s = s.replace(',', '.')
+    try:
+        if '.' in s:
+            return int(round(float(s) * 1_000_000))   # MHz with decimal
+        n = int(s)
+        if n < 100:
+            return n * 1_000_000      # < 100 → MHz
+        if n < 100_000:
+            return n * 1_000          # 100 .. 99,999 → kHz
+        return n                      # >= 100,000 → Hz
+    except ValueError:
+        return None
 
 
 class FrequencyDisplay(QWidget):
@@ -60,6 +109,10 @@ class FrequencyDisplay(QWidget):
         # wheel behavior, which matches how rigs and other SDR clients
         # work. When 0/None, falls back to per-digit 10^N stepping.
         self._external_step_hz: int = 0
+        # Inline text editor for direct frequency entry. Created lazy
+        # on first double-click. Hidden when not editing — the LED
+        # painting still happens normally underneath.
+        self._edit_field: QLineEdit | None = None
         self.setMinimumSize(340, 66)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -205,6 +258,118 @@ class FrequencyDisplay(QWidget):
             p.setPen(QPen(QColor(0, 229, 255, 180), 1))
             p.drawText(QPointF((w - bw) // 2, h // 2 + 4),
                        self._disabled_banner)
+
+    # ── Direct frequency entry ────────────────────────────────────────
+    def _enter_edit_mode(self):
+        """Show the inline QLineEdit overlaid on the digit area for
+        direct typing. Pre-fills with the current frequency in MHz
+        format with 6 decimals (matches what the operator sees on
+        screen) and selects all so a fresh number replaces it."""
+        if not self._enabled:
+            return
+        if self._edit_field is None:
+            self._edit_field = QLineEdit(self)
+            # Match the LED look closely so the transition feels
+            # seamless: black bg, amber text, mono font, cyan
+            # selection border, big digits.
+            self._edit_field.setStyleSheet(
+                "QLineEdit {"
+                " background: #000000;"
+                " color: #ffb000;"
+                " border: 2px solid #00d8ff;"
+                " border-radius: 3px;"
+                " font-family: Consolas, monospace;"
+                " font-weight: 700;"
+                " padding: 2px 6px;"
+                "}"
+            )
+            # Two commit triggers — belt + suspenders:
+            #   returnPressed: explicit Enter/Return key
+            #   editingFinished: also fires on Enter, AND on focus loss
+            #     (so clicking outside the field commits rather than
+            #     silently dropping the text)
+            # Both call into _commit_edit which is guarded by a
+            # _edit_committed flag — the flag prevents the same
+            # entry from being applied twice (Enter fires both
+            # signals back-to-back). Esc cancels via eventFilter
+            # which sets _edit_cancelled to suppress the commit on
+            # the editingFinished fired by the resulting focus loss.
+            self._edit_cancelled = False
+            self._edit_committed = False
+            self._edit_field.returnPressed.connect(self._commit_edit)
+            self._edit_field.editingFinished.connect(self._on_editing_finished)
+            self._edit_field.installEventFilter(self)
+        # Position over the full widget rect; keep it slightly inset
+        # so the cyan border is visible.
+        margin = 4
+        self._edit_field.setGeometry(
+            margin, margin,
+            max(60, self.width() - 2 * margin),
+            max(20, self.height() - 2 * margin),
+        )
+        # Match font size to the available height
+        font = self._edit_field.font()
+        font.setPixelSize(max(14, int((self.height() - 2 * margin) * 0.55)))
+        self._edit_field.setFont(font)
+        self._edit_field.setText(f"{self._freq_hz / 1_000_000:.6f}")
+        self._edit_field.selectAll()
+        # Reset state for this new editing session
+        self._edit_cancelled = False
+        self._edit_committed = False
+        self._edit_field.show()
+        self._edit_field.setFocus()
+
+    def _commit_edit(self):
+        if self._edit_field is None or self._edit_committed:
+            return
+        # Mark committed FIRST so the editingFinished signal that
+        # follows our hide() can't re-enter this function and try
+        # to commit the same text twice.
+        self._edit_committed = True
+        text = self._edit_field.text()
+        self._edit_field.hide()
+        hz = parse_freq_input(text)
+        if hz is None:
+            print(f"[freq] could not parse {text!r} — entry ignored")
+            return
+        new_hz = max(0, min(self.MAX_HZ, int(hz)))
+        delta = new_hz - self._freq_hz
+        if delta != 0:
+            self._change_freq(delta)
+
+    def _on_editing_finished(self):
+        """editingFinished fires on Enter AND on focus loss. Treat
+        focus-loss-with-content as "user clicked away meaning to
+        commit" rather than silently discarding the text. The Esc
+        path sets _edit_cancelled so we know to skip commit there."""
+        if self._edit_cancelled:
+            self._edit_cancelled = False
+            return
+        # Defer to commit. _commit_edit is idempotent (early-exits
+        # if the field's already hidden) so a double-fire from
+        # returnPressed + editingFinished is harmless.
+        self._commit_edit()
+
+    def _cancel_edit(self):
+        if self._edit_field is not None:
+            self._edit_cancelled = True
+            self._edit_field.hide()
+
+    def eventFilter(self, obj, event):
+        # Intercept Esc on the inline editor to cancel without commit
+        if obj is self._edit_field and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self._cancel_edit()
+                return True
+        return super().eventFilter(obj, event)
+
+    def mouseDoubleClickEvent(self, event):
+        """Double-click anywhere on the LED display → enter direct-
+        edit mode. Right-clicking digits is reserved for future
+        memory features so we use double-click here, which is also
+        how most desktop apps signal "edit this thing"."""
+        if self._enabled and event.button() == Qt.LeftButton:
+            self._enter_edit_mode()
 
     # ── Mouse / wheel / keyboard ──────────────────────────────────────
     def mousePressEvent(self, event):
