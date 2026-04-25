@@ -657,8 +657,12 @@ class MainWindow(QMainWindow):
             "this readout is useful for spotting external apps\n"
             "competing for GPU resources, or for confirming that\n"
             "the OS compositor isn't the bottleneck on slower PCs.\n\n"
-            "Reads NVIDIA GPUs via the NVML library; AMD / Intel /\n"
-            "no NVIDIA = 'n/a'. Install nvidia-ml-py for the readout.")
+            "Reads NVIDIA GPUs via NVML; AMD / Intel via Windows\n"
+            "Performance Counters (PDH); no driver = 'n/a'.\n\n"
+            "Right-click → Hide if you're investigating spectrum\n"
+            "paint stutter — PDH calls are usually fast but can\n"
+            "occasionally hit slow paths on Windows. Toggling this\n"
+            "off is the fastest A/B test for that suspicion.")
         tb.addWidget(self.gpu_label)
         # GPU monitor — try two paths in order of preference:
         #
@@ -717,6 +721,23 @@ class MainWindow(QMainWindow):
         self._gpu_timer.setInterval(1000)
         self._gpu_timer.timeout.connect(self._tick_gpu)
         self._gpu_timer.start()
+        # Right-click to hide — useful for A/B-testing whether the
+        # GPU readout's PDH polling is contributing to spectrum
+        # paint stutter on this hardware. PDH calls are usually fast
+        # but can hit slow paths (counter reload, GPU-engine enum)
+        # that block the calling thread for tens of ms.
+        self.gpu_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.gpu_label.customContextMenuRequested.connect(
+            lambda pos: self._show_readout_menu(self.gpu_label, "gpu", pos))
+        # Same right-click affordance on CPU and HL2 for symmetry
+        # and so the operator can isolate any of the three timers
+        # if they want to.
+        self.cpu_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.cpu_label.customContextMenuRequested.connect(
+            lambda pos: self._show_readout_menu(self.cpu_label, "cpu", pos))
+        self.hl2_telem_label.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.hl2_telem_label.customContextMenuRequested.connect(
+            lambda pos: self._show_readout_menu(self.hl2_telem_label, "hl2", pos))
 
         # ── Small fixed right margin — keeps HL2/CPU/GPU breathing
         #     room from the right edge of the toolbar instead of
@@ -1061,6 +1082,81 @@ class MainWindow(QMainWindow):
             "implemented from the public TCI v1.9 / v2.0 spec."
             "</p>"
         )
+
+    # ── Toolbar readout visibility (HL2 / CPU / GPU) ────────────────
+    # Each of the three diagnostic readouts on the right side of the
+    # toolbar can be hidden independently. Useful both for tidying up
+    # the toolbar (operators who don't care about CPU%) and for
+    # A/B-testing whether one of the timers is contributing to
+    # paint stutter (mostly the GPU PDH path on Windows).
+    _READOUT_LABELS = {
+        "hl2": "HL2 telemetry",
+        "cpu": "CPU usage",
+        "gpu": "GPU usage",
+    }
+
+    def _show_readout_menu(self, label_widget, key: str, pos):
+        """Right-click on a toolbar readout → hide / unhide menu."""
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        nice = self._READOUT_LABELS.get(key, key)
+        hide_act = menu.addAction(f"Hide {nice} readout")
+        hide_act.triggered.connect(lambda: self._set_readout_visible(key, False))
+        # If any readouts are currently hidden, offer a "show all" entry.
+        any_hidden = any(
+            self._settings.value(f"toolbar/readout_hidden_{k}", False, type=bool)
+            for k in self._READOUT_LABELS
+        )
+        if any_hidden:
+            menu.addSeparator()
+            show_all = menu.addAction("Show all hidden readouts")
+            show_all.triggered.connect(self._show_all_readouts)
+        menu.exec(label_widget.mapToGlobal(pos))
+
+    def _set_readout_visible(self, key: str, visible: bool):
+        """Show/hide a toolbar readout AND start/stop its driving
+        timer so a hidden readout truly costs zero — no PDH polling,
+        no telemetry emit, no clock tick wasted on something the
+        operator can't see."""
+        widget, timer_attr = {
+            "hl2": (self.hl2_telem_label, None),  # no per-tick UI timer; data comes from radio
+            "cpu": (self.cpu_label, "_cpu_timer"),
+            "gpu": (self.gpu_label, "_gpu_timer"),
+        }[key]
+        widget.setVisible(visible)
+        if timer_attr is not None:
+            timer = getattr(self, timer_attr, None)
+            if timer is not None:
+                if visible:
+                    timer.start()
+                else:
+                    timer.stop()
+        # The HL2 telemetry timer lives on Radio (2 Hz) — toggling it
+        # would also affect anyone else listening, so we just hide the
+        # label and leave Radio's timer running (cost: ~zero, just a
+        # signal emit nobody reads).
+        self._settings.setValue(f"toolbar/readout_hidden_{key}", not visible)
+        self._settings.sync()
+        self.statusBar().showMessage(
+            f"{self._READOUT_LABELS[key]} {'hidden' if not visible else 'shown'}"
+            "  —  right-click another readout to toggle, or use 'Show all'.",
+            3000)
+
+    def _show_all_readouts(self):
+        """Restore visibility of all toolbar readouts (useful after
+        an A/B test or just to recover from accidentally hiding one)."""
+        for key in self._READOUT_LABELS:
+            self._set_readout_visible(key, True)
+
+    def _apply_readout_visibility_from_settings(self):
+        """Read persisted hidden-state and apply on launch — called
+        from _load_settings() so an operator's "I always want CPU
+        hidden" preference carries over restarts."""
+        for key in self._READOUT_LABELS:
+            hidden = self._settings.value(
+                f"toolbar/readout_hidden_{key}", False, type=bool)
+            if hidden:
+                self._set_readout_visible(key, False)
 
     # ── Lock / unlock panels ────────────────────────────────────────
     def _on_lock_panels_toggled(self, locked: bool):
@@ -1727,6 +1823,12 @@ class MainWindow(QMainWindow):
         # carries over a restart. Done AFTER restoreState() so the
         # docks exist and have their default features set first.
         self._apply_panels_lock_from_settings()
+        # Re-apply hidden-readout state for the toolbar diagnostic
+        # readouts (HL2 / CPU / GPU). If the operator hid one of
+        # them — e.g. as part of A/B-testing whether the GPU PDH
+        # timer was contributing to paint stutter — that preference
+        # carries over restarts.
+        self._apply_readout_visibility_from_settings()
         # ── TCI settings ─────────────────────────────────────────────
         tci = self.pnl_tci.server
         if s.contains("tci/port"):

@@ -522,11 +522,24 @@ class AnalogMeter(QWidget):
     def _tick_decay(self):
         dt_s = 0.05
         decay = self._peak_decay_dB_per_s * dt_s
+        old_peak = self._peak
         if self._peak > self._value + decay:
             self._peak -= decay
         else:
             self._peak = self._value
-        self.update()
+        if old_peak != self._peak:
+            self.update()
+
+    # Pause the decay timer when hidden (e.g. swapped out in a
+    # QStackedWidget). Saves 20 timer-ticks/sec of wasted work.
+    def showEvent(self, event):
+        if not self._decay_timer.isActive():
+            self._decay_timer.start(50)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._decay_timer.stop()
+        super().hideEvent(event)
 
 
 # ── Lit-arc segment meter (no needle — segments light along the arc) ──
@@ -1028,11 +1041,30 @@ class LitArcMeter(QWidget):
 
     # ── Decay tick + mode click ──────────────────────────────────────
     def _tick_decay(self):
+        """50 ms tick — only schedules a repaint if the visible state
+        actually changed. Avoids constant 20 Hz repaints at steady
+        state (no signal jitter, peak fully decayed) which were
+        contributing to main-thread paint pressure."""
+        old_peak = self._peak_dbfs
         if self._peak_dbfs > self._dbfs:
             self._peak_dbfs -= self._peak_decay_dB_per_s * 0.05
             if self._peak_dbfs < self._dbfs:
                 self._peak_dbfs = self._dbfs
-        self.update()
+        if old_peak != self._peak_dbfs:
+            self.update()
+
+    # Pause the decay timer while the widget is hidden (e.g. stowed
+    # in a QStackedWidget that's showing one of the other meter
+    # styles). Saves 20 timer-callbacks per second per hidden meter
+    # that would otherwise just call self.update() into the void.
+    def showEvent(self, event):
+        if not self._decay_timer.isActive():
+            self._decay_timer.start(50)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._decay_timer.stop()
+        super().hideEvent(event)
 
     def mousePressEvent(self, event):
         pos = event.position()
@@ -1281,11 +1313,24 @@ class LedBarMeter(QWidget):
     def _tick_decay(self):
         dt_s = 0.05
         decay = self._peak_decay_dB_per_s * dt_s
+        old_peak = self._peak
         if self._peak > self._value + decay:
             self._peak -= decay
         else:
             self._peak = self._value
-        self.update()
+        if old_peak != self._peak:
+            self.update()
+
+    # Pause the decay timer when hidden (e.g. swapped out in a
+    # QStackedWidget). Saves 20 timer-ticks/sec of wasted work.
+    def showEvent(self, event):
+        if not self._decay_timer.isActive():
+            self._decay_timer.start(50)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._decay_timer.stop()
+        super().hideEvent(event)
 
 
 # ── Legacy bar SMeter kept for backward compatibility ─────────────────
