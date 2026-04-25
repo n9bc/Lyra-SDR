@@ -112,7 +112,39 @@ harmonic often lands on 40 m (N8SDR's station, for example, has a
   products all across the spectrum.
 - Place a **notch** on the offending carrier.
 
+## Lyra started up looking weird (panels hidden, scale off-screen, can't drag splitters)
+
+Lyra auto-saves your panel layout on every close and reloads it on
+launch. If a session ended with the layout in a bad state, the next
+launch will restore the bad state — and "Reset Panel Layout" by
+itself can leave the broken layout in `dock_state` for the next
+launch to reload.
+
+**The fix is one click:** **File → Snapshots ▸ → "yesterday at HH:MM"**.
+Lyra takes an automatic snapshot of every preference (including
+layout) on every launch and keeps the last 10. Pick a snapshot from
+before the breakage and click — your prior state is restored
+immediately, and a safety snapshot of the current (broken) state
+is saved alongside in case you want to flip back.
+
+If snapshots aren't available (e.g., this is your first launch
+after the break), close Lyra and run this from a Command Prompt:
+
+```bat
+python -c "from PySide6.QtCore import QSettings; s=QSettings('N8SDR','Lyra'); [s.remove(k) for k in ('dock_state','center_split','user_default_dock_state','user_default_center_split','geometry')]; s.sync(); print('Layout keys cleared - relaunch Lyra')"
+```
+
+That deletes only the 5 layout-related keys; everything else
+(IP, audio device, AGC profile, color picks, balance, cal trim,
+etc.) is untouched. Relaunch Lyra and you'll get a clean factory
+layout you can re-customize.
+
 ## Something else is broken
 
 Save a **per-session log** (backlog feature — not yet implemented)
 and file a bug. For now: console output + `mem` + screenshot.
+
+If the issue is configuration-related and you can repro it on
+demand, **export your settings via File → Export settings…** and
+attach the JSON to your bug report — saves a lot of back-and-forth
+diagnosing.

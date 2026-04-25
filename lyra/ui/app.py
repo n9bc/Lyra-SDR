@@ -131,6 +131,20 @@ class MainWindow(QMainWindow):
 
         self._load_settings()
 
+        # Auto-snapshot of settings on every launch — gives the operator
+        # a free "yesterday's working config" rollback target whenever
+        # something in the current session goes sideways. Stored in
+        # %LOCALAPPDATA%\\N8SDR\\Lyra\\snapshots\\auto-snapshot-*.json,
+        # last 10 retained, surfaced via File → Snapshots.
+        # Wrapped in try/except: a snapshot failure is annoying but
+        # should never prevent Lyra from launching.
+        try:
+            from .settings_backup import auto_snapshot
+            auto_snapshot(reason="launch")
+        except Exception as _e:
+            # Don't crash on permissions / disk-full / etc.
+            print(f"Lyra: auto-snapshot on launch failed: {_e}")
+
         # OpenGL upsell — fire shortly after the main window is fully
         # painted so the modal dialog reliably appears on top instead
         # of being parented to a half-shown window (which on Windows
@@ -253,6 +267,45 @@ class MainWindow(QMainWindow):
         dsp_act.setToolTip("Open Settings → DSP tab (AGC, NR, NB, EQ)")
         dsp_act.triggered.connect(lambda: self._open_settings(tab="DSP"))
         file_menu.addAction(dsp_act)
+
+        file_menu.addSeparator()
+
+        # ── Backup / import / export of all settings ────────────────
+        # Operator-facing safety net: every preference Lyra stores
+        # (layout, IP, audio device, AGC profile, color picks, balance,
+        # cal trim, dock positions, band memory, etc.) lives under one
+        # QSettings namespace. This menu lets the operator export the
+        # whole thing to a JSON file, import a previously-saved file,
+        # or roll back to one of the auto-snapshots taken on every
+        # launch (kept in %LOCALAPPDATA%\\N8SDR\\Lyra\\snapshots).
+        export_act = QAction("&Export settings…", self)
+        export_act.setToolTip(
+            "Save every Lyra preference to a JSON file you can keep, "
+            "share, or use to migrate to another machine.")
+        export_act.triggered.connect(self._on_export_settings)
+        file_menu.addAction(export_act)
+
+        import_act = QAction("&Import settings…", self)
+        import_act.setToolTip(
+            "Load a previously-exported JSON settings file. Auto-takes "
+            "a safety snapshot first so the import is reversible.")
+        import_act.triggered.connect(self._on_import_settings)
+        file_menu.addAction(import_act)
+
+        # Snapshots — populated dynamically each time the menu opens
+        # so the list reflects whatever's currently in the snapshots
+        # directory (auto + manual).
+        self.snapshots_menu = file_menu.addMenu("S&napshots")
+        self.snapshots_menu.aboutToShow.connect(self._populate_snapshots_menu)
+
+        open_snapshots_folder_act = QAction("Open snapshots &folder…", self)
+        open_snapshots_folder_act.setToolTip(
+            "Open the folder where Lyra stores automatic snapshots and "
+            "manual exports, in your file manager.")
+        open_snapshots_folder_act.triggered.connect(
+            self._on_open_snapshots_folder)
+        file_menu.addAction(open_snapshots_folder_act)
+
         file_menu.addSeparator()
         quit_act = QAction("E&xit", self)
         quit_act.setShortcut("Ctrl+Q")
@@ -969,6 +1022,153 @@ class MainWindow(QMainWindow):
             "implemented from the public TCI v1.9 / v2.0 spec."
             "</p>"
         )
+
+    # ── Settings backup / import / export ────────────────────────────
+    def _on_export_settings(self):
+        """File → Export settings… — save the QSettings namespace to a
+        JSON file the operator picks. Uses the snapshots directory as
+        the default starting location so manual exports live alongside
+        the auto-snapshots in one easy-to-browse place."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from datetime import datetime
+        from .settings_backup import snapshots_dir, export_settings
+        # Auto-save first so the JSON has the latest UI state
+        # (window geometry, dock positions, splitter widths) — the
+        # operator's expectation is "I'm exporting WHAT I SEE NOW."
+        try:
+            self._save_settings()
+        except Exception:
+            pass
+        default_name = (
+            f"Lyra-config-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.json")
+        default_path = str(snapshots_dir() / default_name)
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Lyra settings",
+            default_path, "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            from pathlib import Path as _Path
+            n = export_settings(_Path(path))
+            QMessageBox.information(
+                self, "Settings exported",
+                f"Wrote {n} settings to:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Export failed",
+                f"Could not write settings to:\n{path}\n\n{e}")
+
+    def _on_import_settings(self):
+        """File → Import settings… — load a JSON file and replay it
+        into QSettings. A safety snapshot of the current state is taken
+        FIRST so the operator can roll back via Snapshots if the import
+        was wrong. Layout-affecting changes need a restart to fully
+        take effect — we surface that in the success dialog."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from .settings_backup import snapshots_dir, import_settings
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import Lyra settings",
+            str(snapshots_dir()), "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        # Last-chance "really do this?" confirmation — import REPLACES
+        # all current settings (clear-then-write) so the user shouldn't
+        # be surprised after the click.
+        reply = QMessageBox.question(
+            self, "Import settings",
+            "Importing will REPLACE all your current Lyra settings "
+            "with the contents of:\n\n"
+            f"{path}\n\n"
+            "A safety snapshot of your current state will be taken "
+            "first, so you can roll back via "
+            "File → Snapshots if needed.\n\n"
+            "Proceed?",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel)
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            from pathlib import Path as _Path
+            n, safety_path = import_settings(_Path(path))
+            QMessageBox.information(
+                self, "Settings imported",
+                f"Imported {n} settings from:\n{path}\n\n"
+                f"Safety snapshot of your prior state was saved as:\n"
+                f"{safety_path.name if safety_path else '(none)'}\n\n"
+                "Some changes (panel layout, graphics backend, font "
+                "sizes) need a Lyra restart to take effect.")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Import failed",
+                f"Could not import settings from:\n{path}\n\n{e}\n\n"
+                "Your current settings have not been changed.")
+
+    def _populate_snapshots_menu(self):
+        """File → Snapshots — rebuild the submenu every time it opens
+        so it always reflects the latest contents of the snapshots
+        directory. Each entry is a clickable action that restores
+        that snapshot (with the same safety-snapshot-first behavior
+        as the regular Import action)."""
+        from .settings_backup import list_snapshots, snapshot_summary
+        self.snapshots_menu.clear()
+        snaps = list_snapshots()
+        if not snaps:
+            empty = self.snapshots_menu.addAction(
+                "(no snapshots yet — one is taken on each launch)")
+            empty.setEnabled(False)
+            return
+        # Show up to ~15 most recent so the menu doesn't get
+        # absurdly long if the operator's been running Lyra a lot.
+        for path in snaps[:15]:
+            summ = snapshot_summary(path)
+            mtime = summ["mtime"]
+            label = f"{mtime.strftime('%Y-%m-%d  %H:%M:%S')}  —  v{summ['lyra_version']}"
+            reason = summ.get("snapshot_reason")
+            if reason and reason != "launch":
+                label += f"  ({reason})"
+            act = self.snapshots_menu.addAction(label)
+            act.triggered.connect(
+                lambda _checked=False, p=path: self._restore_snapshot(p))
+
+    def _restore_snapshot(self, path):
+        """Restore from one of the snapshot files in the Snapshots
+        submenu. Same flow as Import (with safety snapshot first)."""
+        from PySide6.QtWidgets import QMessageBox
+        from .settings_backup import import_settings
+        reply = QMessageBox.question(
+            self, "Restore snapshot",
+            f"Restore Lyra settings from this snapshot?\n\n"
+            f"{path.name}\n\n"
+            "A safety snapshot of your CURRENT state will be taken "
+            "first, so this is reversible.",
+            QMessageBox.Yes | QMessageBox.Cancel,
+            QMessageBox.Cancel)
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            n, safety_path = import_settings(path)
+            QMessageBox.information(
+                self, "Snapshot restored",
+                f"Restored {n} settings.\n\n"
+                f"Your previous state was saved as:\n"
+                f"{safety_path.name if safety_path else '(none)'}\n\n"
+                "Restart Lyra for layout / graphics-backend changes "
+                "to take full effect.")
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Restore failed",
+                f"Could not restore from:\n{path}\n\n{e}\n\n"
+                "Your current settings have not been changed.")
+
+    def _on_open_snapshots_folder(self):
+        """File → Open snapshots folder — launch the OS file manager
+        at the snapshots directory so the operator can copy / move /
+        archive snapshot files manually."""
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from .settings_backup import snapshots_dir
+        d = snapshots_dir()
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(d)))
 
     def _open_telem_probe(self):
         """Help → HL2 Telemetry Probe. Opens the diagnostic dialog

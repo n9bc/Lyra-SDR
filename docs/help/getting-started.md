@@ -94,3 +94,35 @@ The version you're running is shown in three places:
 When filing a bug report, please include the version string from any
 of those — it lets the maintainer match your report to the exact
 code that produced it.
+
+## 8. Backups & snapshots
+
+Lyra stores every operator preference (layout, IP address, audio
+device, AGC profile, color picks, balance, cal trim, dock positions,
+band memory, and more) under a single namespace. The **File** menu
+exposes four actions for managing this:
+
+| Action | Does |
+|---|---|
+| **Export settings…** | Save your entire preference set to a JSON file. Use this to back up before risky changes, share a config with another operator, or migrate to a new machine. |
+| **Import settings…** | Load a previously-exported JSON. Replaces your current settings. **A safety snapshot of your current state is taken first** so you can roll back. |
+| **Snapshots ▸** | Submenu of automatic snapshots. Lyra takes one snapshot every launch and keeps the last 10. Click any entry to restore. |
+| **Open snapshots folder** | Launch File Explorer at the folder where snapshots live (`%LOCALAPPDATA%\N8SDR\Lyra\snapshots\` on Windows). |
+
+**The auto-snapshot is your free safety net** — if anything in
+your current session goes sideways (wrong panel layout saved as
+default, accidental Reset to a blank screen, color picks gone
+weird), File → Snapshots → "yesterday at 14:23" puts you back in
+one click.
+
+A few notes:
+
+- Snapshots are plain JSON. You can open one in any text editor
+  to inspect or hand-edit individual settings if you really want to.
+- Importing a snapshot from a NEWER Lyra version is refused (the
+  refusal is friendly, not destructive). Update Lyra first.
+- Layout / graphics-backend changes need a Lyra restart to fully
+  take effect after import — the success dialog reminds you.
+- Manual exports (created via "Export settings…") are NOT counted
+  toward the 10-snapshot retention limit; they live alongside the
+  auto-snapshots in the same folder but are never auto-deleted.

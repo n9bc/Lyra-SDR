@@ -1409,7 +1409,10 @@ class VisualsSettingsTab(QWidget):
             "to match a reference signal generator. Default = 0 dB "
             "(true dBFS — a full-scale tone reads as 0).")
         cal_help.setWordWrap(True)
-        cal_help.setStyleSheet("color: #8a9aac; font-size: 10px;")
+        # Inherit the dialog's default font size (matching "Show peak"
+        # / "Show noise floor" chk text); the muted color is the only
+        # visual differentiator vs the chk labels.
+        cal_help.setStyleSheet("color: #b6c0cc;")
         gc.addWidget(cal_help, 0, 0, 1, 3)
 
         gc.addWidget(QLabel("Cal"), 1, 0)
