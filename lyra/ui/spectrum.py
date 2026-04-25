@@ -724,11 +724,19 @@ class SpectrumWidget(_PaintedWidget):
                 p.drawLine(x_hi - 1, 0, x_hi - 1, h)
 
         if self._spec_db is None or len(self._spec_db) == 0:
+            # Placeholder so an empty spectrum widget doesn't look hung
+            p.setPen(QPen(QColor(120, 140, 160, 200), 1))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "Waiting for stream…\n\n"
+                       "Click ▶ Start on the toolbar")
             return
 
         span_db = self._max_db - self._min_db
         if span_db <= 0:
-            return
+            # Defensive: collapsed dB range. Force a reasonable
+            # working span so the trace renders instead of returning
+            # silently (which used to look like a hang).
+            span_db = 90.0
 
         n = len(self._spec_db)
         # Decimate or interpolate to pixel width
@@ -1255,10 +1263,18 @@ class WaterfallWidget(_PaintedWidget):
             self._width = n
             self._data = np.zeros((self._rows, n), dtype=np.uint32)
             self._data[:] = 0xFF000000 | (BG.red() << 16) | (BG.green() << 8) | BG.blue()
+            # Paint at least the BG so the operator sees the widget
+            # is alive even if the very first row hasn't been
+            # successfully scaled yet (span check below).
+            self.update()
 
         span = self._max_db - self._min_db
+        # Defensive: if dB range collapsed (shouldn't happen since
+        # set_waterfall_db_range clamps to >=3 dB span, but QSettings
+        # could load stale corrupt values), force a workable span so
+        # the waterfall doesn't silently freeze with rows queued.
         if span <= 0:
-            return
+            span = 80.0
         norm = np.clip((spec_db - self._min_db) / span, 0.0, 1.0)
         idx = (norm * 255).astype(np.uint8)
         rgb = self._palette[idx]
@@ -1276,6 +1292,13 @@ class WaterfallWidget(_PaintedWidget):
         p = QPainter(self)
         p.fillRect(self.rect(), BG)
         if self._data is None:
+            # Show a placeholder so the operator knows the widget is
+            # alive — without this, an empty widget looked indistinguishable
+            # from a hung one. Painted center-screen, dim grey.
+            p.setPen(QPen(QColor(120, 140, 160, 200), 1))
+            p.drawText(self.rect(), Qt.AlignCenter,
+                       "Waiting for stream…\n\n"
+                       "Click ▶ Start on the toolbar")
             return
         # Build a QImage view over the numpy buffer (no copy). The QImage
         # must reference bytes that outlive the paint call — self._data does.

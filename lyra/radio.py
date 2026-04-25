@@ -604,6 +604,10 @@ class Radio(QObject):
                 self.status_message.emit(f"Freq set failed: {e}", 3000)
         with self._ring_lock:
             self._sample_ring.clear()
+        # Reset waterfall tick counter on freq change too, so the
+        # next waterfall row arrives promptly instead of inheriting
+        # whatever counter state existed at the previous frequency.
+        self._waterfall_tick_counter = 0
         self._rebuild_notches()
         # If the band just changed and filter board is active, push the
         # new OC pattern so the N2ADR relays follow.
@@ -626,6 +630,11 @@ class Radio(QObject):
         with self._ring_lock:
             self._sample_ring.clear()
         self._audio_buf.clear()
+        # Reset the waterfall tick counter so the divider check
+        # starts cleanly with the new rate. Without this, a counter
+        # mid-cycle could leave the next waterfall row up to N FFT
+        # ticks late (looked like a brief hang on rate change).
+        self._waterfall_tick_counter = 0
         if self._stream:
             try:
                 self._stream.set_sample_rate(rate)
