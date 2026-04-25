@@ -339,18 +339,35 @@ class MainWindow(QMainWindow):
         save_layout = QAction("Save current layout as my default", self)
         save_layout.setToolTip(
             "Capture the current arrangement (panel positions, sizes, "
-            "splitter widths) and use it as the new default. 'Reset Panel "
-            "Layout' below will then restore to THIS state instead of the "
-            "factory layout.")
+            "splitter widths) and use it as the new default. "
+            "'Restore my saved layout' below will return to THIS state.\n\n"
+            "Refuses to save if any panel is too small to read — "
+            "prevents capturing a momentarily-broken layout.")
         save_layout.triggered.connect(self._save_current_as_default_layout)
         view_menu.addAction(save_layout)
+
+        restore_user = QAction("Restore my saved layout", self)
+        restore_user.setToolTip(
+            "Return to the panel arrangement you saved with "
+            "'Save current layout as my default'. Separate from "
+            "'Reset Panel Layout' — Reset always goes to factory, "
+            "this goes to your saved version.")
+        restore_user.triggered.connect(self._restore_user_default_layout)
+        view_menu.addAction(restore_user)
+
         reset = QAction("Reset Panel Layout", self)
+        reset.setToolTip(
+            "ALWAYS restore the factory arrangement (Tuning + Mode + "
+            "View on top, Band + Meters split, DSP+Audio at bottom). "
+            "The universal panic button — works regardless of saved "
+            "layouts or current state.")
         reset.triggered.connect(self._reset_layout)
         view_menu.addAction(reset)
-        clear_default = QAction("Forget saved layout (revert to factory)", self)
+        clear_default = QAction("Forget saved layout", self)
         clear_default.setToolTip(
-            "Discard the user-saved default layout. Reset Panel Layout "
-            "will once again restore to the factory arrangement.")
+            "Discard the user-saved default layout. "
+            "'Restore my saved layout' will report 'no saved layout' "
+            "until you save a new one.")
         clear_default.triggered.connect(self._clear_user_default_layout)
         view_menu.addAction(clear_default)
 
@@ -1318,36 +1335,55 @@ class MainWindow(QMainWindow):
         widget.update()
         QTimer.singleShot(1500, lambda: widget.setStyleSheet(prior))
 
+    # ── Layout sanity check ──────────────────────────────────────────
+    # Any dock smaller than this in either dimension is "degenerate"
+    # — the operator can't see useful UI in there. If the live layout
+    # is degenerate, refuse to persist it.
+    _MIN_VISIBLE_DOCK_W_PX     = 80
+    _MIN_VISIBLE_DOCK_H_PX     = 50
+    _MIN_CENTRAL_W_PX          = 200
+    _MIN_CENTRAL_H_PX          = 120
+    _MIN_MAIN_WINDOW_W_PX      = 600
+    _MIN_MAIN_WINDOW_H_PX      = 400
+
+    def _is_layout_state_sane(self) -> tuple[bool, str]:
+        """Validate the LIVE layout before persisting it. Returns
+        (is_sane, reason_if_not). The reason is a short human-readable
+        string the caller can put in a status-bar toast."""
+        if (self.width() < self._MIN_MAIN_WINDOW_W_PX
+                or self.height() < self._MIN_MAIN_WINDOW_H_PX):
+            return False, (f"main window {self.width()}×{self.height()} "
+                           "below sane minimum")
+        for name, dock in self.docks.items():
+            if not dock.isVisible() or dock.isFloating():
+                continue
+            if (dock.width()  < self._MIN_VISIBLE_DOCK_W_PX
+                    or dock.height() < self._MIN_VISIBLE_DOCK_H_PX):
+                return False, (f"panel '{name}' is "
+                               f"{dock.width()}×{dock.height()} "
+                               "(below the sane minimum)")
+        cw = self.centralWidget()
+        if cw is not None:
+            if (cw.width()  < self._MIN_CENTRAL_W_PX
+                    or cw.height() < self._MIN_CENTRAL_H_PX):
+                return False, ("central spectrum/waterfall area is "
+                               f"{cw.width()}×{cw.height()} "
+                               "(below sane minimum)")
+        return True, ""
+
+    # ── Reset Panel Layout — always goes to factory ──────────────────
     def _reset_layout(self):
-        """Restore the default arrangement.
+        """ALWAYS restore the hardcoded factory arrangement.
 
-        Two-tier default:
-        - If the operator has saved a personal default via
-          'Save current layout as my default', restore THAT.
-        - Otherwise restore the factory layout (Tuning + Mode + View
-          on top row, Band + Meters split, DSP at bottom).
+        This is the universal "panic button" — it never goes to the
+        user-saved default (use 'Restore my saved layout' for that).
+        Earlier versions tried to be clever and prefer user-saved over
+        factory, but that meant operators stuck with a corrupted saved
+        layout had no escape hatch. Reset = factory, period.
 
-        This way 'Reset Panel Layout' is "go back to known good"
-        regardless of whether the operator's "known good" matches
-        the factory or their own customization.
+        Factory arrangement: Tuning + Mode + View on top row,
+        Band + Meters split, DSP+Audio at bottom.
         """
-        user_state = self._settings.value("user_default_dock_state")
-        user_split = self._settings.value("user_default_center_split")
-        if user_state:
-            try:
-                self.restoreState(user_state)
-                if user_split:
-                    self.center_splitter.restoreState(user_split)
-                for dock in self.docks.values():
-                    dock.setVisible(True)
-                return
-            except Exception:
-                # Fall through to factory layout if the saved state
-                # is somehow corrupt (binary format change between
-                # Qt versions, etc.)
-                pass
-        # Factory layout — Remove every dock from its current
-        # position, then rebuild.
         for dock in self.docks.values():
             self.removeDockWidget(dock)
             dock.setFloating(False)
@@ -1364,40 +1400,82 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, self.docks["dsp"])
         for dock in self.docks.values():
             dock.setVisible(True)
+        self.statusBar().showMessage(
+            "Panel layout reset to factory defaults", 2500)
+
+    def _restore_user_default_layout(self):
+        """View → Restore my saved layout — load whatever the operator
+        stashed via 'Save current layout as my default'. Separate from
+        _reset_layout so the operator picks intentionally between
+        'factory' (Reset Panel Layout) and 'my saved one' (this)."""
+        from PySide6.QtWidgets import QMessageBox
+        user_state = self._settings.value("user_default_dock_state")
+        user_split = self._settings.value("user_default_center_split")
+        if not user_state:
+            QMessageBox.information(
+                self, "No saved layout",
+                "You haven't saved a custom default layout yet.\n\n"
+                "Arrange your panels how you want them, then "
+                "View → Save current layout as my default.")
+            return
+        try:
+            self.restoreState(user_state)
+            if user_split:
+                self.center_splitter.restoreState(user_split)
+            for dock in self.docks.values():
+                dock.setVisible(True)
+            self.statusBar().showMessage(
+                "Restored your saved default layout", 2500)
+        except Exception as e:
+            QMessageBox.critical(
+                self, "Restore failed",
+                f"Could not restore your saved layout: {e}\n\n"
+                "Try 'Reset Panel Layout' to go back to the factory "
+                "arrangement.")
 
     def _save_current_as_default_layout(self):
         """Capture the current dock state + center splitter widths
         into QSettings under user_default_* keys. Future
-        'Reset Panel Layout' calls will restore to THIS state."""
+        'Restore my saved layout' calls will restore to THIS state.
+
+        Refuses to save a degenerate layout — if any panel is too
+        small to read, the layout was almost certainly captured
+        during an in-progress drag and persisting it would just
+        recreate the bug on the next launch."""
+        from PySide6.QtWidgets import QMessageBox
+        sane, reason = self._is_layout_state_sane()
+        if not sane:
+            QMessageBox.warning(
+                self, "Won't save degenerate layout",
+                f"The current layout looks broken:\n\n  {reason}\n\n"
+                "Saving this as your default would just recreate "
+                "the problem next launch. Drag the panels back to "
+                "readable sizes and try again.")
+            return
         self._settings.setValue("user_default_dock_state", self.saveState())
         self._settings.setValue(
             "user_default_center_split",
             self.center_splitter.saveState())
         self._settings.sync()
-        # Toast in the status bar so the operator sees it took effect
-        if hasattr(self, "status_dot"):
-            # Reuse the streaming dot's transient-message channel via
-            # the radio if available, else just a print fallback.
-            pass
-        from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(
             self, "Default layout saved",
             "Current panel arrangement saved as your default.\n\n"
-            "'Reset Panel Layout' (View menu / toolbar) will now\n"
-            "restore to THIS state instead of the factory layout.")
+            "View → 'Restore my saved layout' will return to THIS\n"
+            "state any time. (Reset Panel Layout always goes to\n"
+            "the factory arrangement, regardless of saved layouts.)")
 
     def _clear_user_default_layout(self):
-        """Forget the user-saved default. Reset Panel Layout falls
-        back to the hardcoded factory arrangement."""
+        """Forget the user-saved default. 'Restore my saved layout'
+        will report "no saved layout" until a new one is saved."""
+        from PySide6.QtWidgets import QMessageBox
         self._settings.remove("user_default_dock_state")
         self._settings.remove("user_default_center_split")
         self._settings.sync()
-        from PySide6.QtWidgets import QMessageBox
         QMessageBox.information(
             self, "Saved layout discarded",
             "Your saved default layout has been removed.\n\n"
-            "'Reset Panel Layout' will now restore to the factory\n"
-            "arrangement (Tuning + Mode + View on top, etc).")
+            "View → 'Restore my saved layout' will now report\n"
+            "'no saved layout' until you save a new one.")
 
     # ── Persistence ──────────────────────────────────────────────────
     def _migrate_legacy_settings(self):
@@ -1736,8 +1814,28 @@ class MainWindow(QMainWindow):
         import json
         s.setValue("band_memory", json.dumps(r.band_memory_snapshot))
         s.setValue("geometry", self.saveGeometry())
-        s.setValue("dock_state", self.saveState())
-        s.setValue("center_split", self.center_splitter.saveState())
+
+        # Layout persistence with sanity check — refuse to overwrite
+        # the saved dock_state with a degenerate one. This is the
+        # important fix: the close-time auto-save was previously
+        # unconditional, so if the operator's session ended with the
+        # layout in a momentarily-bad state (e.g., mid-drag at the
+        # moment of Alt+F4, or any of the "save my broken default"
+        # bug-paths from earlier builds), the broken state became
+        # PERMANENT — next launch reloaded it and there was no escape
+        # short of registry editing.
+        #
+        # With this guard: if the live layout looks broken right now,
+        # we leave the previous session's saved state intact. Result:
+        # last-known-good is preserved, operator is never trapped by
+        # a single bad close.
+        sane, reason = self._is_layout_state_sane()
+        if sane:
+            s.setValue("dock_state", self.saveState())
+            s.setValue("center_split", self.center_splitter.saveState())
+        else:
+            print(f"Lyra: skipped saving layout (reason: {reason}); "
+                  "previous saved layout preserved")
         tci = self.pnl_tci.server
         s.setValue("tci/port", tci.port)
         s.setValue("tci/host", tci.bind_host)

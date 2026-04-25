@@ -114,21 +114,35 @@ harmonic often lands on 40 m (N8SDR's station, for example, has a
 
 ## Lyra started up looking weird (panels hidden, scale off-screen, can't drag splitters)
 
-Lyra auto-saves your panel layout on every close and reloads it on
-launch. If a session ended with the layout in a bad state, the next
-launch will restore the bad state — and "Reset Panel Layout" by
-itself can leave the broken layout in `dock_state` for the next
-launch to reload.
+Three escape hatches, in order of preference:
 
-**The fix is one click:** **File → Snapshots ▸ → "yesterday at HH:MM"**.
-Lyra takes an automatic snapshot of every preference (including
-layout) on every launch and keeps the last 10. Pick a snapshot from
-before the breakage and click — your prior state is restored
-immediately, and a safety snapshot of the current (broken) state
-is saved alongside in case you want to flip back.
+### 1. Toolbar → "Reset Panel Layout"  *(preferred — one click)*
 
-If snapshots aren't available (e.g., this is your first launch
-after the break), close Lyra and run this from a Command Prompt:
+Always restores the **factory** arrangement (Tuning + Mode + View
+on top, Band + Meters split, DSP+Audio at bottom). Never tries to
+load a saved layout — so even if your saved layout is corrupted,
+this works. The status bar will say "Panel layout reset to factory
+defaults" when it fires.
+
+Lyra also has a **sanity check on auto-save**: if the layout is
+broken at close-time (any panel < 80×50 px, central widget < 200×120
+px, or main window < 600×400 px), Lyra refuses to overwrite the
+saved `dock_state` with the broken one. So a single bad close can no
+longer trap you on the next launch — the previous good state is
+preserved.
+
+### 2. File → Snapshots ▸ → "yesterday at HH:MM"
+
+If Reset Layout isn't enough (e.g., your color picks went weird, or
+some non-layout setting got hosed too), pick an automatic snapshot
+from before the breakage. Lyra takes one every launch and keeps the
+last 10. A safety snapshot of your CURRENT state is taken first so
+the rollback is reversible.
+
+### 3. Manual QSettings nuke  *(last resort)*
+
+If neither of the above works (very rare — possible if QSettings
+itself got corrupted), close Lyra and run this from a Command Prompt:
 
 ```bat
 python -c "from PySide6.QtCore import QSettings; s=QSettings('N8SDR','Lyra'); [s.remove(k) for k in ('dock_state','center_split','user_default_dock_state','user_default_center_split','geometry')]; s.sync(); print('Layout keys cleared - relaunch Lyra')"
@@ -138,6 +152,19 @@ That deletes only the 5 layout-related keys; everything else
 (IP, audio device, AGC profile, color picks, balance, cal trim,
 etc.) is untouched. Relaunch Lyra and you'll get a clean factory
 layout you can re-customize.
+
+### Preventing the panic in the first place
+
+Two View-menu features help avoid layout breakage:
+
+- **View → Lock panels (Ctrl+L)** — freezes panel title bars so
+  you can't drag a panel by accident while reaching for some other
+  control. Splitter resize between adjacent panels still works.
+- **View → Save current layout as my default** — captures your
+  preferred arrangement. Use **View → Restore my saved layout** to
+  return to it any time (separate from Reset, which always goes to
+  factory). Saving refuses to capture a degenerate layout, so you
+  can't accidentally save a broken one as your default.
 
 ## Something else is broken
 
