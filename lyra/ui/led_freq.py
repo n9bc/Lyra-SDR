@@ -225,28 +225,35 @@ class FrequencyDisplay(QWidget):
         delta_units = event.angleDelta().y() // 120
         if delta_units == 0:
             return
-        # External step (from the parent panel's Step combo) wins
-        # when set — that's what operators expect: pick "100 Hz" in
-        # the Step dropdown, get 100 Hz per wheel click no matter
-        # which digit the cursor is over. Without an external step
-        # set, fall back to the per-digit 10^N behavior so clicking
-        # a digit and wheeling still works as a quick "tune this
-        # place" shortcut.
-        if self._external_step_hz > 0:
-            self._change_freq(delta_units * self._external_step_hz)
-            event.accept()
-            return
-        # Per-digit fallback: hover-or-selected digit determines
-        # the step.
-        digit = self._selected
+        # Two-tier wheel behavior (matches Thetis / ExpertSDR3):
+        #
+        # 1. If the cursor is HOVERING a specific digit, that digit's
+        #    place value (10^digit_index) wins. Lets the operator
+        #    aim precisely — hover the kHz digit to tune in 1 kHz
+        #    steps regardless of what the Step combo says.
+        #
+        # 2. Otherwise (cursor not on a digit, or aiming at the
+        #    overall display body), use the external step from the
+        #    parent panel's Step combo. That's the operator-set
+        #    "default tuning resolution".
+        #
+        # 3. As a last resort (no external step set, no digit hover,
+        #    but a digit IS selected from a previous click), use that
+        #    selected digit's place value.
+        hover_digit = -1
         for idx, rect in self._digit_rects:
             if rect.contains(event.position()):
-                digit = idx
+                hover_digit = idx
                 self._selected = idx
                 break
-        if digit < 0:
+        if hover_digit >= 0:
+            step = 10 ** hover_digit
+        elif self._external_step_hz > 0:
+            step = self._external_step_hz
+        elif self._selected >= 0:
+            step = 10 ** self._selected
+        else:
             return super().wheelEvent(event)
-        step = 10 ** digit
         self._change_freq(delta_units * step)
         event.accept()
 
