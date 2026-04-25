@@ -96,6 +96,39 @@ at the door, click again to resume at exactly the volume you set.
 Mute state is Radio-side, so TCI volume commands can't accidentally
 un-mute you.
 
+### Bal — stereo balance / pan
+
+Slider on the DSP + Audio panel between **Vol** and **Out**. Pans
+the (currently mono) audio between the left and right channels
+using an equal-power pan law (cos / sin at π/4) — the perceived
+loudness stays constant as you sweep across center, instead of
+sagging in the middle the way a naive linear pan would.
+
+**Three ways to find center:**
+
+1. **Visible tick marks** below the slider track — five marks at
+   L100 / L50 / **C** / R50 / R100. The center mark is where you
+   stop for true mono.
+2. **Snap-to-center deadzone** — sweeping within ±3% of center
+   automatically locks to true zero. Lets you find center without
+   pixel-perfect aim.
+3. **Click the L37 / C / R12 label** to the right of the slider
+   to instantly recenter. Double-clicking the slider track itself
+   does the same thing.
+
+**Works on both output sinks:**
+
+- **PC Soundcard** — applied per-channel before stereo write to
+  the WASAPI output device.
+- **AK4951** — the HL2's onboard codec is a true stereo DAC. The
+  EP2 audio frame has separate Left16 / Right16 fields that the
+  gateware routes to the AK4951's L/R channels independently. Lyra
+  applies the balance gains and feeds proper stereo to both.
+
+**Future expansion (after RX2 ships):** the same Bal slider will
+become the RX1 / RX2 mixing control — RX1 to one ear, RX2 to the
+other for DX-split listening.
+
 ## AGC interactions
 
 AGC sits BEFORE AF Gain in the chain. With AGC **on** (Fast / Med /

@@ -71,3 +71,26 @@ Turn it off if your amp has a dedicated 60 m setting.
 
 See **Audio Routing** for how RX audio flows through the AK4951 and
 into the PC line-in instead of being decoded on the PC.
+
+## HL2 hardware telemetry on the toolbar
+
+When the stream is running, the toolbar shows a live readout from
+the HL2's onboard sensors:
+
+```
+HL2  T 25.1°C   V 12.3 V
+```
+
+- **T** — AD9866 die temperature. Idle 45–55 °C is normal; 60–70 °C
+  is warm; sustained > 80 °C means check airflow / cooling.
+- **V** — supply rail voltage measured through the on-board AIN6
+  divider. A healthy 12 V PSU should sit between 11.5 and 13.0 V;
+  sagging below 11 V points to a weak supply or a long thin power
+  lead.
+
+If either field shows `n/a` after a few seconds of streaming, your
+HL2 firmware variant doesn't populate that telemetry slot in the
+EP6 stream. Open **Help → HL2 Telemetry Probe…** to capture a few
+seconds of raw C&C bytes and see exactly which addresses your rig
+is sending — useful for diagnosing firmware-variant decode issues
+or filing an issue with the project.

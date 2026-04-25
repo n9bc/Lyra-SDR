@@ -87,6 +87,22 @@ span 47 Hz at 6.25 Hz spacing). For narrow-CW work, drop the default
 to 20–50 Hz before placing notches; for broadband interference,
 bump to 300+ Hz.
 
+## Identifying a notch — hover callout
+
+Hovering the cursor over any notch (on either the panadapter or the
+waterfall) raises a tooltip showing the notch's frequency, current
+width, and any flags (`INACTIVE`, `DEEP`):
+
+```
+Notch  7.0741 MHz
+Width  80 Hz
+```
+
+Useful when you have a few notches close together and need to know
+which is which before adjusting one. The cursor also changes to a
+vertical-resize shape so the operator knows that the notch is
+draggable in the vertical direction.
+
 ## Adjusting an existing notch
 
 - **Mouse wheel** over a notch → adjusts its width.

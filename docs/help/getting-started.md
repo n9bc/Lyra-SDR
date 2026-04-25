@@ -41,7 +41,35 @@ Make sure Windows Firewall allows inbound UDP 1024 for `python.exe`
 - You should see a spectrum trace and hear a noise floor.
 - If you don't: see **Troubleshooting**.
 
-## 5. Save your workspace
+## 5. The top toolbar at a glance
+
+Reading left to right, the always-visible toolbar shows:
+
+| Section | What it is |
+|---|---|
+| **▶ Start** | One-click stream start/stop |
+| **● Streaming** | Connection status dot (gray / yellow / green) |
+| **● TCI ready** | TCI server status — click to open Network settings |
+| **⚙ Settings…** | Tabbed settings dialog |
+| **Reset Panel Layout** | Restore the factory panel arrangement |
+| **Tuning / Mode+Filter / View / Band / Meters / DSP+Audio** | Show / hide each docked panel |
+| **ADC pk / rms** | Live RX-chain headroom (color-coded for clip risk) |
+| **HH:MM:SS  HH:MM:SSZ** | Local + UTC clocks (large, always visible) |
+| **HL2  T xx.x°C   V xx.x V** | Live HL2 hardware telemetry |
+| **CPU x.x%** | Lyra process CPU load (matches Task Manager) |
+| **GPU x.x%** | System-wide GPU load |
+
+The HL2 telemetry pair takes a few EP6 frames to populate after
+**Start** because the radio rotates which register it reports each
+frame. If voltage stays at `n/a`, your HL2 firmware variant doesn't
+populate that telemetry slot — open **Help → HL2 Telemetry Probe…**
+to see what your specific firmware sends.
+
+The CPU/GPU readouts are color-coded green / yellow / orange / red
+so you can glance at the toolbar and see whether something is
+hammering your machine.
+
+## 6. Save your workspace
 
 The panel layout (which panels are visible, where they dock, floating
 window positions) is saved automatically on close and restored on next
@@ -49,3 +77,20 @@ launch.
 
 **View → Reset Panel Layout** restores the factory arrangement if you
 end up with panels somewhere weird.
+
+**View → Save current layout as my default** captures wherever you've
+arranged things now and uses it as the new factory default — so
+"Reset Panel Layout" goes back to *your* preferred layout instead of
+the original one.
+
+## 7. About this build
+
+The version you're running is shown in three places:
+
+- The window title bar (`Lyra v0.0.2 — Hermes Lite 2+ SDR Transceiver`)
+- A permanent label on the right side of the status bar
+- **Help → About Lyra…**
+
+When filing a bug report, please include the version string from any
+of those — it lets the maintainer match your report to the exact
+code that produced it.
