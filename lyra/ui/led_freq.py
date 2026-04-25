@@ -53,6 +53,13 @@ class FrequencyDisplay(QWidget):
         # Optional banner shown over the digits when disabled. Useful
         # to distinguish "disabled RX2" from "RX2 at 0 Hz".
         self._disabled_banner: str = ""
+        # Optional EXTERNAL step in Hz — when set (>0) the mouse wheel
+        # tunes by exactly this amount per click, regardless of which
+        # digit the wheel is over. Lets the parent panel's "Step"
+        # combo (1 / 10 / 50 / 100 / 500 / 1k / 5k / 10k Hz) drive the
+        # wheel behavior, which matches how rigs and other SDR clients
+        # work. When 0/None, falls back to per-digit 10^N stepping.
+        self._external_step_hz: int = 0
         self.setMinimumSize(340, 66)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -83,6 +90,18 @@ class FrequencyDisplay(QWidget):
 
     def set_selected_digit(self, idx: int):
         self._selected = max(0, min(self.N_DIGITS - 1, int(idx)))
+
+    def set_external_step_hz(self, hz: int):
+        """Set an external step value in Hz that the mouse wheel will
+        use instead of per-digit stepping. 0 / None disables and
+        restores per-digit behavior. Called by TuningPanel when the
+        Step combo changes so the wheel honors the operator's
+        chosen tuning resolution."""
+        try:
+            v = int(hz) if hz is not None else 0
+        except (TypeError, ValueError):
+            v = 0
+        self._external_step_hz = max(0, v)
         self.update()
 
     # ── Painting ──────────────────────────────────────────────────────
@@ -203,8 +222,22 @@ class FrequencyDisplay(QWidget):
     def wheelEvent(self, event):
         if not self._enabled:
             return super().wheelEvent(event)
-        # If hovering a digit, wheel that digit's place (else the currently-
-        # selected digit's place).
+        delta_units = event.angleDelta().y() // 120
+        if delta_units == 0:
+            return
+        # External step (from the parent panel's Step combo) wins
+        # when set — that's what operators expect: pick "100 Hz" in
+        # the Step dropdown, get 100 Hz per wheel click no matter
+        # which digit the cursor is over. Without an external step
+        # set, fall back to the per-digit 10^N behavior so clicking
+        # a digit and wheeling still works as a quick "tune this
+        # place" shortcut.
+        if self._external_step_hz > 0:
+            self._change_freq(delta_units * self._external_step_hz)
+            event.accept()
+            return
+        # Per-digit fallback: hover-or-selected digit determines
+        # the step.
         digit = self._selected
         for idx, rect in self._digit_rects:
             if rect.contains(event.position()):
@@ -214,9 +247,6 @@ class FrequencyDisplay(QWidget):
         if digit < 0:
             return super().wheelEvent(event)
         step = 10 ** digit
-        delta_units = event.angleDelta().y() // 120
-        if delta_units == 0:
-            return
         self._change_freq(delta_units * step)
         event.accept()
 

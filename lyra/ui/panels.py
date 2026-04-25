@@ -227,6 +227,12 @@ class TuningPanel(GlassPanel):
     def _on_step_changed(self, _idx):
         step = int(self.step_combo.currentData())
         self.freq_spin.setSingleStep(step / 1e6)
+        # Push the step to the LED display so its mouse wheel uses
+        # this Hz value instead of per-digit 10^N stepping. Operators
+        # expect "I picked 100 Hz step → wheeling tunes 100 Hz per
+        # click no matter where my cursor is on the digits".
+        if hasattr(self, "freq_display"):
+            self.freq_display.set_external_step_hz(step)
 
     def _on_radio_freq_changed(self, hz: int):
         # Sync both the LED display and the backup spinbox
