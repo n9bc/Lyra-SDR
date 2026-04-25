@@ -1,0 +1,21 @@
+# Lyra-SDR runtime dependencies
+# Install with:  pip install -r requirements.txt
+#
+# Tested versions are pinned with floors so pip can pick the latest
+# compatible point release. If you hit a regression on a brand-new
+# upstream version, pin tighter and open an issue on the repo.
+
+# ── Required ─────────────────────────────────────────────────────
+PySide6>=6.5            # Qt6 bindings — UI, signals, OpenGL widgets
+numpy>=1.23,<3          # IQ buffers, FFT, AGC math
+scipy>=1.10             # FIR/IIR filter design, signal processing
+sounddevice>=0.4.6      # PortAudio output (PC Soundcard sink)
+websockets>=11.0        # TCI v1.9 server (logger / DX cluster integration)
+
+# ── Optional ─────────────────────────────────────────────────────
+# Only needed if you use a USB-BCD cable to drive an external linear
+# amplifier's band switching (FTDI FT232R-based). If install fails
+# (e.g., no FTDI drivers on the machine), comment this line out and
+# everything else still works — Lyra just won't expose the USB-BCD
+# config tab in Settings.
+ftd2xx>=1.3

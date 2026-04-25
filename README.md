@@ -66,14 +66,22 @@ against a Hermes Lite 2+ board.
 
 ## Running from source
 
-Requires Python 3.11+ on Windows. From the project root:
+Requires Python 3.11+ on Windows.
+
+**Quickstart:**
 
 ```
-pip install PySide6 numpy scipy sounddevice ftd2xx websockets
+pip install -r requirements.txt
 python -m lyra.ui.app
 ```
 
 Or double-click `LYRA.bat`.
+
+**Step-by-step install for non-developer testers:**
+see [`INSTALL.md`](INSTALL.md) — covers Python installation, Git
+setup, dependency install, common gotchas, and feedback channels.
+A printable Word version is also at
+[`docs/Lyra-SDR-Install-Guide.docx`](docs/Lyra-SDR-Install-Guide.docx).
 
 On first launch, Lyra tries to discover an HL2 on the local network.
 If the board is reachable it'll show up in the connection panel; if
