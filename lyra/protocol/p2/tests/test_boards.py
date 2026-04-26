@@ -19,19 +19,19 @@ class BoardsTest(unittest.TestCase):
         spec = lookup_board(6)
         self.assertIsNotNone(spec)
         assert spec is not None
-        self.assertEqual(spec.short_name, "HL2")
+        self.assertEqual(spec.short_name, "Hermes Lite")
         self.assertEqual(spec.family, "HermesLite")
+        self.assertEqual(spec.ddc_offset_for_rx1, 0,
+                         "HermesLite uses DDC0 for RX1, unlike ORION2")
 
     def test_unknown_id_returns_none(self) -> None:
-        # Brick II's ID is not in v4.4 spec; verify the unknown-ID path
-        # is well-behaved rather than KeyError.
         self.assertIsNone(lookup_board(99))
         self.assertIsNone(lookup_board(255))  # full-form sentinel, not a real board
 
     def test_is_apache_classifier(self) -> None:
         self.assertTrue(is_apache(10))   # G2
         self.assertTrue(is_apache(5))    # ANAN-7000
-        self.assertFalse(is_apache(6))   # HL2 is HermesLite family
+        self.assertFalse(is_apache(6))   # HermesLite family (incl. Brick II)
         self.assertFalse(is_apache(0))   # Atlas is its own family
         self.assertFalse(is_apache(99))  # unknown
 
