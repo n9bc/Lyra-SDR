@@ -127,16 +127,6 @@ class Radio(QObject):
     smeter_mode_changed  = Signal(str)                  # "peak" | "avg"
     status_message       = Signal(str, int)             # text, timeout_ms
 
-    # DSP performance instrumentation — Phase 1a of GPU-FFT plan.
-    # Emitted at ~1 Hz from _tick_fft when self._perf_enabled is True.
-    # Payload: dict-of-dicts keyed by timer name ("fft", "tick", …),
-    # each inner dict the result of PerfSnapshot.to_dict(). UI overlay
-    # reads this to display a small "FFT 2.3 ms · tick 5.1 ms · 30 Hz"
-    # status-bar readout. Signal fires only when perf is on, so the
-    # UI doesn't have to poll. Establishes the baseline measurement
-    # path for the GPU-FFT comparison work.
-    perf_stats_changed   = Signal(dict)
-
     # ── TCI spots (DX cluster markers on the panadapter) ───────────────
     spots_changed        = Signal(list)  # list of dict(call, mode, freq_hz, color)
     spot_activated       = Signal(str, str, int)  # call, mode, freq_hz
@@ -650,37 +640,6 @@ class Radio(QObject):
         self._fft_timer = QTimer(self)
         self._fft_timer.timeout.connect(self._tick_fft)
         self._fft_timer.start(33)
-
-        # ── DSP performance instrumentation (Phase 1a of GPU-FFT plan)─
-        # Defaults to OFF so the released installer doesn't pay for
-        # measurement overhead operators don't see. View menu toggle
-        # flips this; setting persists in QSettings under "perf/enabled".
-        # The two timers ("fft" = the np.fft.fft call alone, "tick" =
-        # the entire _tick_fft body) are the baseline numbers we'll
-        # compare against once VulkanFFTBackend lands. Counter throttles
-        # the perf_stats_changed emission to ~1 Hz regardless of FFT
-        # rate so the UI doesn't get spammed.
-        from PySide6.QtCore import QSettings as _QS
-        from lyra.dsp.perf import get_or_create as _perf_get
-        self._perf_enabled = (str(_QS("N8SDR", "Lyra").value(
-            "perf/enabled", "false")).lower() == "true")
-        # Stage timers — Phase 1a.2 fine-grained breakdown. The "fft"
-        # and "tick" timers are kept first so the existing UI code
-        # works unchanged; the per-stage timers add detail for the
-        # GPU-FFT decision (do we actually need GPU offload, or is the
-        # bottleneck elsewhere — sample-ring iteration, dB conversion,
-        # signal emit?). Names chosen to fit a one-line status-bar
-        # display: "ring 6.2 · fft 0.1 · db 1.4 · smt 0.1 · nf 0.4 ·
-        # scale 0.0 · emit 1.9 ms · tick 10.2 · 13 Hz".
-        self._perf_fft_timer    = _perf_get("fft")
-        self._perf_tick_timer   = _perf_get("tick")
-        self._perf_ring_timer   = _perf_get("ring")
-        self._perf_db_timer     = _perf_get("db")
-        self._perf_smeter_timer = _perf_get("smt")
-        self._perf_nf_timer     = _perf_get("nf")
-        self._perf_scale_timer  = _perf_get("scale")
-        self._perf_emit_timer   = _perf_get("emit")
-        self._perf_emit_counter = 0
 
     # ── Read-only properties ──────────────────────────────────────────
     @property
@@ -2709,67 +2668,15 @@ class Radio(QObject):
             self.status_message.emit(f"Audio output error: {e}", 6000)
             return NullSink()
 
-    # ── DSP performance instrumentation API (Phase 1a) ───────────────
-    @property
-    def perf_enabled(self) -> bool:
-        return self._perf_enabled
-
-    def set_perf_enabled(self, on: bool) -> None:
-        """Toggle DSP performance instrumentation on/off. When on, the
-        FFT tick measures itself and emits perf_stats_changed at ~1 Hz
-        for the status-bar overlay. Persisted to QSettings so the
-        operator's choice survives across launches.
-
-        Resets all rolling stats on transition so the displayed
-        averages reflect only the most recent enabled period — avoids
-        the "I just turned it on but the average says 200 ms because
-        the timer ran briefly weeks ago" footgun.
-        """
-        if on == self._perf_enabled:
-            return
-        self._perf_enabled = bool(on)
-        from PySide6.QtCore import QSettings as _QS
-        _QS("N8SDR", "Lyra").setValue(
-            "perf/enabled", "true" if self._perf_enabled else "false")
-        if self._perf_enabled:
-            from lyra.dsp.perf import reset_all as _reset
-            _reset()
-
     # ── FFT tick → spectrum + S-meter signals ─────────────────────────
     def _tick_fft(self):
-        # Phase 1a.2 perf instrumentation. When `_perf` is False, all
-        # `if _perf:` checks short-circuit and the only added cost is
-        # one local-variable read per stage (effectively free). When
-        # True we time each stage separately so we can attribute
-        # latency: ring fetch (deque iteration), FFT proper (the GPU
-        # candidate), dB conversion (vectorized log10), S-meter
-        # (passband stats), noise floor (percentile), auto-scale
-        # (range fit), signal emit (Qt cross-thread + downstream
-        # widget paint trigger). Without per-stage breakdown we'd be
-        # guessing where the bottleneck lives — the whole point of
-        # Phase 1a is to MEASURE before optimizing.
-        import time as _t
-        _perf = self._perf_enabled
-        _tick_t0 = _t.perf_counter() if _perf else 0.0
-
-        # ── Stage 1: ring fetch ──────────────────────────────────
-        if _perf: _s = _t.perf_counter()
         with self._ring_lock:
             if len(self._sample_ring) < self._fft_size:
                 return
             arr = np.fromiter(self._sample_ring, dtype=np.complex64,
                               count=len(self._sample_ring))
         seg = arr[-self._fft_size:] * self._window
-        if _perf:
-            self._perf_ring_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
-
-        # ── Stage 2: FFT proper (the GPU candidate) ──────────────
-        if _perf: _s = _t.perf_counter()
         f = np.fft.fftshift(np.fft.fft(seg))
-        if _perf:
-            self._perf_fft_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
         # HL2 baseband is spectrum-mirrored relative to sky frequency:
         # signals above the LO show up at NEGATIVE baseband bins, not
         # positive. The SSBDemod path handles this with its own sign
@@ -2779,20 +2686,13 @@ class Radio(QObject):
         # the sky-frequency convention every other SDR UI uses. This
         # also makes click-to-tune, notch placement, spot markers,
         # and the RX filter passband overlay all agree visually.
-        # ── Stage 3: dB conversion (mirror flip + log10) ─────────
-        if _perf: _s = _t.perf_counter()
         f = f[::-1]
         # 10·log10(|X|²/N²·CG²)  —  windowed-FFT dBFS, plus the
         # operator's per-rig cal trim. Float32 throughout to keep
         # the ~6 Hz FFT loop cheap.
         spec_db = (10.0 * np.log10((np.abs(f) ** 2) / self._win_norm + 1e-20)
                    + self._spectrum_cal_db)
-        if _perf:
-            self._perf_db_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
 
-        # ── Stage 4: S-meter ─────────────────────────────────────
-        if _perf: _s = _t.perf_counter()
         # S-meter uses the full (un-zoomed) spectrum — it must measure
         # the tuned signal regardless of display zoom. Bins are now in
         # sky-frequency order after the un-mirror flip above, but the
@@ -2829,12 +2729,7 @@ class Radio(QObject):
             else:  # "peak" — instantaneous max bin in passband
                 level_db = float(np.max(band)) + self._smeter_cal_db
             self.smeter_level.emit(level_db)
-        if _perf:
-            self._perf_smeter_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
 
-        # ── Stage 5: noise floor ─────────────────────────────────
-        if _perf: _s = _t.perf_counter()
         # Noise-floor estimate — 20th percentile rejects the upper 80%
         # of bins (which likely contain signals), leaving the ambient
         # noise. Rolling-averaged over ~1 s to damp out FFT-to-FFT
@@ -2855,12 +2750,7 @@ class Radio(QObject):
             if self._nf_emit_counter >= 5:
                 self._nf_emit_counter = 0
                 self.noise_floor_changed.emit(float(self._noise_floor_db))
-        if _perf:
-            self._perf_nf_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
 
-        # ── Stage 6: auto-scale ──────────────────────────────────
-        if _perf: _s = _t.perf_counter()
         # Spectrum auto range scaling. Every AUTO_SCALE_INTERVAL_TICKS,
         # rebuild the dB range to:
         #   low edge  = noise_floor − 15 dB
@@ -2929,21 +2819,10 @@ class Radio(QObject):
             # Auto turned off — drop the history so it doesn't grow
             # unbounded if the operator never re-enables.
             self._auto_scale_peak_history = []
-        if _perf:
-            self._perf_scale_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
 
-        # ── Stage 7: zoom + signal emit ──────────────────────────
-        # Captures the cost of the spectrum_ready and waterfall_ready
-        # signal emissions plus the tiny zoom-crop math. The signal
-        # emit itself is "instant" on same-thread connections (which
-        # is what we're using here — _tick_fft and the panadapter
-        # widget both live on the Qt main thread), but the connected
-        # SLOTS run synchronously inside the emit call. So this stage
-        # is effectively measuring "how long does the panadapter +
-        # waterfall take to redraw in response to one new frame".
-        # That's the cost we'd be left with even if FFT became free.
-        if _perf: _s = _t.perf_counter()
+        # Zoom = crop to centered subset of bins. Widgets infer span
+        # from the `effective_rate` we report here, so their freq axis
+        # scales automatically.
         if self._zoom > 1.0:
             total = spec_db.shape[0]
             keep = max(64, int(total / self._zoom))
@@ -2964,24 +2843,3 @@ class Radio(QObject):
             for _ in range(self._waterfall_multiplier):
                 self.waterfall_ready.emit(
                     spec_out, float(self._freq_hz), eff_rate)
-        if _perf:
-            self._perf_emit_timer.observe_ms(
-                (_t.perf_counter() - _s) * 1000.0)
-
-        # Phase 1a perf instrumentation — close out the per-tick
-        # timer and push a snapshot to the UI at ~1 Hz. Counter
-        # throttles emission so the status-bar overlay updates
-        # smoothly regardless of FFT rate (fast at 30 Hz, calm at
-        # 6 Hz). When perf is off the entire block is skipped.
-        if _perf:
-            self._perf_tick_timer.observe_ms(
-                (_t.perf_counter() - _tick_t0) * 1000.0)
-            self._perf_emit_counter += 1
-            # Emit roughly once per second. self._fps drives FFT rate,
-            # so dividing by max(1, fps) gives a ~1-second cadence at
-            # any FPS the operator picks.
-            emit_every = max(1, int(getattr(self, "_fps", 10)))
-            if self._perf_emit_counter >= emit_every:
-                self._perf_emit_counter = 0
-                from lyra.dsp.perf import snapshot_all as _snap_all
-                self.perf_stats_changed.emit(_snap_all())
