@@ -258,6 +258,17 @@ Source: ExpertSDR3 manual pp. 70-95. Full feature set for eventual parity.
 
 - [x] **Full-duplex** — already enabled (C4 bit 2 set in config register).
       Required for pre-distortion and for proper HL2/HL2+ PA operation.
+- [/] **HPSDR Protocol 2 (Apache ANAN G2 / Brick II)** — RX-only Phase 1-3
+      shipped on `feat/protocol-2-apache` (2026-04-26). Discovery, packet
+      encoders, P2Stream, board lookup table (Atlas/Hermes/Orion/Saturn),
+      synthetic-radio loopback for hardware-free testing. End-to-end
+      verified against the loopback. Outstanding: Phase 5 = Radio-class
+      integration so the UI can pick a P2 radio from the connection
+      dropdown; Phase 6 = TX over P2 (DUC, DUCIQ, mic-in routing). See
+      `docs/superpowers/specs/2026-04-26-protocol-2-apache-design.md`.
+      Brick II's board ID is not in v4.4 spec; loopback handles unknown
+      IDs gracefully — actual ID gets added to `lyra/protocol/p2/boards.py`
+      once the user runs discovery against the real hardware.
 - [ ] **TX path** — SSB modulator, PTT, CW keyer, RTTY/FSK, AK4951 mic
       input vs PC mic selectable. User's preferred mic path: AK4951.
 - [ ] **PA protection** / fault monitoring — HL2 I/O board registers
