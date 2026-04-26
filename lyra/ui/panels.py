@@ -434,6 +434,25 @@ class ViewPanel(GlassPanel):
             "this slider freely rides between them. Either control\n"
             "drives the same Radio.zoom — mouse-wheel on the\n"
             "spectrum still uses preset steps.")
+        # Same press/release pattern as the FPS slider — committing
+        # zoom on every pixel of drag was DESTROYING the waterfall
+        # display. WaterfallWidget reallocates its scroll buffer to
+        # all-zero whenever the bin count changes, and zoom changes
+        # the bin count (keep = fft_size/zoom). Per-pixel commits =
+        # hundreds of full waterfall buffer wipes during a drag.
+        # Now: commit only on release (or via debounce for click /
+        # arrow-key changes).
+        self._zoom_dragging = False
+        # _QTimer is used by both the zoom and FPS sliders below.
+        # Imported here (the earlier of the two construction sites)
+        # so both can reference it.
+        from PySide6.QtCore import QTimer as _QTimer
+        self._zoom_debounce = _QTimer(self)
+        self._zoom_debounce.setSingleShot(True)
+        self._zoom_debounce.setInterval(75)
+        self._zoom_debounce.timeout.connect(self._commit_zoom_value)
+        self.zoom_slider.sliderPressed.connect(self._on_zoom_slider_press)
+        self.zoom_slider.sliderReleased.connect(self._on_zoom_slider_release)
         self.zoom_slider.valueChanged.connect(self._on_zoom_slider)
         h.addWidget(self.zoom_slider)
 
@@ -583,8 +602,31 @@ class ViewPanel(GlassPanel):
     def _on_zoom_pick(self, _idx: int):
         self.radio.set_zoom(float(self.zoom_combo.currentData()))
 
+    def _on_zoom_slider_press(self):
+        """Mouse-down on zoom slider — drag begins."""
+        self._zoom_dragging = True
+        self._zoom_debounce.stop()
+
+    def _on_zoom_slider_release(self):
+        """Mouse-up — drag complete. Commit immediately."""
+        self._zoom_dragging = False
+        self._zoom_debounce.stop()
+        self._commit_zoom_value()
+
     def _on_zoom_slider(self, v: int):
-        """Fine-zoom slider drag — slider int = zoom × 10."""
+        """valueChanged — drag-aware. While the operator is actively
+        dragging, only the live label updates; radio is left alone so
+        the waterfall buffer doesn't get wiped on every pixel of
+        motion. Click-jumps and keyboard changes go through the 75 ms
+        debounce path."""
+        zoom = max(1.0, min(16.0, v / 10.0))
+        self.zoom_label.setText(f"{zoom:.1f}x")
+        if self._zoom_dragging:
+            return
+        self._zoom_debounce.start()
+
+    def _commit_zoom_value(self):
+        v = self.zoom_slider.value()
         zoom = max(1.0, min(16.0, v / 10.0))
         # Snap to a preset when the slider lands within ±0.05× of one
         # so the combo + slider feel coupled (otherwise the combo
