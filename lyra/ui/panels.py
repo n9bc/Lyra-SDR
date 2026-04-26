@@ -2025,6 +2025,76 @@ class SpectrumPanel(GlassPanel):
     def __init__(self, radio: Radio, parent=None):
         super().__init__("PANADAPTER", parent, help_topic="spectrum")
         self.radio = radio
+
+        # Branch on graphics backend. The default ("software" /
+        # "opengl") creates the existing QPainter SpectrumWidget with
+        # all its overlays and interactions wired up. The new
+        # "gpu_opengl" path builds the from-scratch SpectrumGpuWidget
+        # — fast trace render, but currently no overlays / no
+        # interactions (notches, spots, band plan, peak markers,
+        # click-to-tune, etc.). Successive commits will add those
+        # back. Default stays QPainter until the GPU widget reaches
+        # feature parity AND has tester time across many GPU configs.
+        from lyra.ui.gfx import is_gpu_panadapter_active
+        if is_gpu_panadapter_active():
+            self._setup_gpu_panadapter()
+        else:
+            self._setup_qpainter_panadapter()
+
+    # ── GPU panadapter (BACKEND_GPU_OPENGL) ────────────────────────
+    def _setup_gpu_panadapter(self) -> None:
+        """Phase B.2 minimal wiring for SpectrumGpuWidget. Connects
+        only the signals the GPU widget understands today:
+
+          - spectrum_ready → set_spectrum (with dB range)
+          - spectrum_trace_color_changed → set_trace_color
+
+        DELIBERATELY NOT WIRED (no equivalent on GPU widget yet):
+          - notches, spots, band plan overlay
+          - peak markers, noise floor reference line
+          - passband overlay, RX BW drag
+          - click-to-tune, right-click menu, wheel zoom
+          - Y-axis drag-to-scale, db_scale_drag
+          - landmark click
+
+        These all require shader / overlay extensions to the GPU
+        widget. Tracking them as the Phase B.3+ backlog. Operators
+        on the BETA backend get a fast, clean trace but no
+        interactivity until those land.
+        """
+        from lyra.ui.spectrum_gpu import SpectrumGpuWidget
+        self.widget = SpectrumGpuWidget()
+        self.content_layout().addWidget(self.widget)
+        # Wrap the spectrum_ready signal — Radio emits
+        # (spec_db, center_hz, rate) but our widget wants
+        # (spec_db, min_db, max_db). We read the dB range fresh
+        # from Radio each tick so live Settings changes take effect
+        # immediately without an extra signal subscription.
+        self.radio.spectrum_ready.connect(self._gpu_on_spectrum_ready)
+        # Trace color — Radio holds the operator's pick; sync it now
+        # and on changes.
+        self._gpu_apply_trace_color()
+        self.radio.spectrum_trace_color_changed.connect(
+            lambda _hex: self._gpu_apply_trace_color())
+
+    def _gpu_on_spectrum_ready(self, spec_db, center_hz, rate):
+        lo, hi = self.radio.spectrum_db_range
+        self.widget.set_spectrum(spec_db, min_db=lo, max_db=hi)
+
+    def _gpu_apply_trace_color(self) -> None:
+        from PySide6.QtGui import QColor
+        col = QColor(self.radio.spectrum_trace_color)
+        if col.isValid():
+            self.widget.set_trace_color(col)
+
+    # ── QPainter panadapter (BACKEND_SOFTWARE / BACKEND_OPENGL) ────
+    def _setup_qpainter_panadapter(self) -> None:
+        """Original SpectrumPanel wiring, unchanged. Built when the
+        backend is BACKEND_SOFTWARE or BACKEND_OPENGL — both run the
+        QPainter SpectrumWidget; the only difference is its base
+        class (QWidget vs QOpenGLWidget) which is resolved at gfx.py
+        import time."""
+        radio = self.radio
         self.widget = SpectrumWidget()
         self.content_layout().addWidget(self.widget)
         self.widget.clicked_freq.connect(self._on_click)
@@ -2386,6 +2456,41 @@ class WaterfallPanel(GlassPanel):
     def __init__(self, radio: Radio, parent=None):
         super().__init__("WATERFALL", parent, help_topic="spectrum")
         self.radio = radio
+
+        # Branch on graphics backend (mirror of SpectrumPanel — see
+        # that class's __init__ for the full rationale).
+        from lyra.ui.gfx import is_gpu_panadapter_active
+        if is_gpu_panadapter_active():
+            self._setup_gpu_waterfall()
+        else:
+            self._setup_qpainter_waterfall()
+
+    # ── GPU waterfall (BACKEND_GPU_OPENGL) ─────────────────────────
+    def _setup_gpu_waterfall(self) -> None:
+        """Phase B.2 minimal wiring for WaterfallGpuWidget. Connects
+        only the signals the GPU widget understands today:
+
+          - waterfall_ready → push_row (with dB range)
+
+        DELIBERATELY NOT WIRED:
+          - notches overlay (no shader pass yet)
+          - palette LUT (Phase B.3+ — currently grayscale)
+          - click-to-tune, right-click menu, wheel notch-Q
+          - tuning-aware redraws (no center/rate display)
+        """
+        from lyra.ui.spectrum_gpu import WaterfallGpuWidget
+        self.widget = WaterfallGpuWidget()
+        self.content_layout().addWidget(self.widget)
+        self.radio.waterfall_ready.connect(self._gpu_on_waterfall_ready)
+
+    def _gpu_on_waterfall_ready(self, spec_db, center_hz, rate):
+        lo, hi = self.radio.waterfall_db_range
+        self.widget.push_row(spec_db, min_db=lo, max_db=hi)
+
+    # ── QPainter waterfall (BACKEND_SOFTWARE / BACKEND_OPENGL) ─────
+    def _setup_qpainter_waterfall(self) -> None:
+        """Original WaterfallPanel wiring, unchanged."""
+        radio = self.radio
         self.widget = WaterfallWidget()
         self.content_layout().addWidget(self.widget)
         self.widget.clicked_freq.connect(self._on_click)
