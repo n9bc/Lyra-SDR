@@ -1126,10 +1126,19 @@ class VisualsSettingsTab(QWidget):
         self._wf_max,   self._wf_max_lbl   = self._db_slider(
             gd, 3, "Waterfall max", radio.waterfall_db_range[1])
 
-        self._spec_min.valueChanged.connect(self._on_db_changed)
-        self._spec_max.valueChanged.connect(self._on_db_changed)
-        self._wf_min.valueChanged.connect(self._on_db_changed)
-        self._wf_max.valueChanged.connect(self._on_db_changed)
+        # Separate handlers — earlier the four sliders all fed
+        # _on_db_changed which pushed BOTH spectrum AND waterfall
+        # ranges to Radio every time. Side-effect: dragging a
+        # waterfall slider tripped Radio.set_spectrum_db_range with
+        # from_user=True, which DISABLES Spectrum auto-scale (the
+        # auto-flag-off rule treats any user spectrum-range change
+        # as a deliberate manual override). Now the waterfall
+        # sliders only touch the waterfall range, leaving the
+        # spectrum auto-flag alone.
+        self._spec_min.valueChanged.connect(self._on_spec_db_changed)
+        self._spec_max.valueChanged.connect(self._on_spec_db_changed)
+        self._wf_min.valueChanged.connect(self._on_wf_db_changed)
+        self._wf_max.valueChanged.connect(self._on_wf_db_changed)
 
         # Listen for spectrum range changes from the Radio side too
         # — auto-scale's periodic re-fit fires through this path, and
@@ -1656,17 +1665,32 @@ class VisualsSettingsTab(QWidget):
         grid.addWidget(lbl, row, 2, Qt.AlignLeft)
         return s, lbl
 
-    def _on_db_changed(self):
-        """Push slider values to Radio (which will emit the change
-        signals the painted widgets are subscribed to)."""
+    def _on_spec_db_changed(self):
+        """Spectrum min/max slider drag — only push the SPECTRUM
+        range to Radio. Touching this is a deliberate manual override,
+        so set_spectrum_db_range(from_user=True) correctly disables
+        auto-scale here.
+        """
         sp_lo, sp_hi = self._spec_min.value(), self._spec_max.value()
-        wf_lo, wf_hi = self._wf_min.value(),   self._wf_max.value()
         self._spec_min_lbl.setText(f"{sp_lo:+d} dBFS")
         self._spec_max_lbl.setText(f"{sp_hi:+d} dBFS")
+        self.radio.set_spectrum_db_range(sp_lo, sp_hi)
+
+    def _on_wf_db_changed(self):
+        """Waterfall min/max slider drag — only push the WATERFALL
+        range. Critically, does NOT touch set_spectrum_db_range, so
+        the operator's spectrum auto-scale setting stays intact when
+        they tweak the waterfall display range."""
+        wf_lo, wf_hi = self._wf_min.value(), self._wf_max.value()
         self._wf_min_lbl.setText(f"{wf_lo:+d} dBFS")
         self._wf_max_lbl.setText(f"{wf_hi:+d} dBFS")
-        self.radio.set_spectrum_db_range(sp_lo, sp_hi)
         self.radio.set_waterfall_db_range(wf_lo, wf_hi)
+
+    # Backward-compat alias — anything that called the old combined
+    # name still works (commits BOTH ranges as before).
+    def _on_db_changed(self):
+        self._on_spec_db_changed()
+        self._on_wf_db_changed()
 
     def _on_cal_changed(self, val: int):
         """Cal slider drag — push to Radio + repaint label."""
