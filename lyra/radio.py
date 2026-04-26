@@ -20,6 +20,8 @@ import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from lyra.protocol.stream import HL2Stream, SAMPLE_RATES
+from lyra.protocol.p2.stream import P2Stream
+from lyra.protocol import discover_all
 from lyra.dsp.demod import (
     SSBDemod, CWDemod, AMDemod, DSBDemod, FMDemod, NotchFilter,
 )
@@ -299,6 +301,12 @@ class Radio(QObject):
 
         # ── Persistent-ish state ──────────────────────────────────────
         self._ip = "10.10.30.100"
+        # Which HPSDR protocol the connected radio speaks. "P1" = HL2/HL2+
+        # (the original target hardware); "P2" = Apache ANAN G2, Brick II
+        # and other Apache rigs running openHPSDR Ethernet Protocol v2+.
+        # Decided at discovery time; HL2-only code paths (telemetry decode,
+        # AK4951 audio out, OC C&C writes) are skipped when this is "P2".
+        self._protocol: str = "P1"
         self._freq_hz = 7074000
         self._rate = 48000
         self._mode = "USB"
@@ -450,7 +458,11 @@ class Radio(QObject):
         self._bcd_60m_as_40m = True   # most amps share 40m filter for 60m
 
         # ── Runtime ───────────────────────────────────────────────────
-        self._stream: Optional[HL2Stream] = None
+        # Either HL2Stream (P1) or P2Stream (Apache P2). Both expose
+        # set_sample_rate / set_lna_gain_db / stop / .stats with compatible
+        # surfaces; the P1-private _set_rx1_freq vs P2's set_rx_freq_hz
+        # split is bridged in set_freq_hz.
+        self._stream: Optional[object] = None
         self._audio_sink = NullSink()
         self._audio_block = 2048
         self._tone_phase = 0.0
@@ -902,7 +914,10 @@ class Radio(QObject):
         self._freq_hz = hz
         if self._stream:
             try:
-                self._stream._set_rx1_freq(hz)  # noqa: SLF001
+                if self._protocol == "P2":
+                    self._stream.set_rx_freq_hz(hz)
+                else:
+                    self._stream._set_rx1_freq(hz)  # noqa: SLF001
             except Exception as e:
                 self.status_message.emit(f"Freq set failed: {e}", 3000)
         with self._ring_lock:
@@ -1717,6 +1732,17 @@ class Radio(QObject):
             unit; the UI doesn't display these yet (future TX feature)
             but they're in the payload so future widgets can read them.
         """
+        # HL2-specific telemetry encoded in P1 EP6 C&C blocks. The P2
+        # streaming layer carries High Priority Status separately and
+        # uses different ADC mappings per board, so we just emit NaN
+        # placeholders when connected to a P2 radio — the toolbar
+        # already handles missing values gracefully.
+        if self._protocol != "P1":
+            self.hl2_telemetry_changed.emit({"temp_c":   float("nan"),
+                                             "supply_v": float("nan"),
+                                             "fwd_w":    float("nan"),
+                                             "rev_w":    float("nan")})
+            return
         s = self._stream.stats if self._stream is not None else None
         if s is None:
             payload = {"temp_c":   float("nan"),
@@ -2124,8 +2150,13 @@ class Radio(QObject):
 
         HL2 registers are sticky — one write persists until explicitly
         changed. No need to add this to the stream keepalive rotation;
-        a single fire-and-forget send is enough."""
-        if self._stream is None:
+        a single fire-and-forget send is enough.
+
+        P2 has no equivalent (control-plane there lives in High Priority
+        and DDC Specific packets), so this method is a no-op when the
+        connected radio speaks P2.
+        """
+        if self._stream is None or self._protocol != "P1":
             return
         try:
             self._stream._send_cc(0x00, self._config_c1, self._config_c2,  # noqa: SLF001
@@ -2818,7 +2849,10 @@ class Radio(QObject):
         if self._stream:
             return
         try:
-            self._stream = HL2Stream(self._ip, sample_rate=self._rate)
+            if self._protocol == "P2":
+                self._stream = P2Stream(self._ip, sample_rate=self._rate)
+            else:
+                self._stream = HL2Stream(self._ip, sample_rate=self._rate)
             self._stream.start(
                 on_samples=self._stream_cb,
                 rx_freq_hz=self._freq_hz,
@@ -2830,15 +2864,20 @@ class Radio(QObject):
             return
         self._audio_sink = self._make_sink()
         self._push_balance_to_sink()
-        # Push the filter-board OC pattern now that the stream is live
-        if self._filter_board_enabled:
+        # Push the filter-board OC pattern now that the stream is live.
+        # OC pins are an HL2-board feature; on P2 the equivalent (Apache
+        # Alex / OC outputs) lives in the High Priority packet and isn't
+        # wired up yet — so skip the OC apply when on P2.
+        if self._filter_board_enabled and self._protocol == "P1":
             self._apply_oc_for_current_freq()
         # Start the ADC-peak broadcaster so the toolbar indicator lights up
         self._peak_report_timer.start()
-        # Start polling HL2 hardware telemetry (temp/voltage) so the
-        # banner readouts begin updating once the first EP6 frame
-        # carrying the right C0 address arrives.
-        self._hl2_telem_timer.start()
+        # HL2 hardware telemetry only ticks for P1 — the FrameStats fields
+        # the timer reads are HL2-EP6 specific. P2 telemetry (board temp,
+        # supply, fwd/rev power) lives in the High Priority Status port
+        # and isn't decoded in v1.
+        if self._protocol == "P1":
+            self._hl2_telem_timer.start()
         self.stream_state_changed.emit(True)
 
     def stop(self):
@@ -2869,17 +2908,13 @@ class Radio(QObject):
         self.stream_state_changed.emit(False)
 
     def discover(self):
-        """Auto-discover an HL2 on any local network interface.
-        On failure, suggest the diagnostic probe so the operator can
-        see EXACTLY which interfaces were tried + what came back."""
-        from lyra.protocol.discovery import discover
-        log: list[str] = []
-        radios = discover(timeout_s=1.0, attempts=2, debug_log=log)
-        # Always print the discovery log to console so tester reports
-        # can include the lines without needing to re-run via the
-        # probe dialog.
-        for line in log:
-            print(f"[discover] {line}")
+        """Broadcast P1 + P2 discovery and pick the first radio that replied.
+
+        Sets `self._protocol` to "P1" or "P2" so the next start() routes
+        through the right stream class and skips HL2-only feature paths
+        (telemetry decode, AK4951 audio out, OC C&C) when on P2.
+        """
+        radios = discover_all(timeout_s=1.0, attempts=2)
         if not radios:
             self.status_message.emit(
                 "No radios found. Try Help → Network Discovery Probe "
@@ -2887,10 +2922,19 @@ class Radio(QObject):
                 8000)
             return
         r = radios[0]
+        self._protocol = r.protocol
         self.set_ip(r.ip)
+        # Code-version line differs between protocols: P1 has a beta byte,
+        # P2 reports a single firmware byte plus the protocol revision.
+        if r.protocol == "P1":
+            beta = getattr(r.raw, "beta_version", 0)
+            ver_str = f"gateware v{r.code_version}.{beta}"
+        else:
+            proto_v = getattr(r.raw, "protocol_version", 0)
+            ver_str = (f"P2 firmware {r.code_version}, "
+                       f"proto v{proto_v // 10}.{proto_v % 10}")
         self.status_message.emit(
-            f"Found {r.board_name} at {r.ip}  "
-            f"gateware v{r.code_version}.{r.beta_version}",
+            f"Found {r.board_name} at {r.ip}  ({r.protocol}) {ver_str}",
             5000,
         )
 
@@ -3290,7 +3334,10 @@ class Radio(QObject):
             self._push_balance_to_sink()
 
     def _make_sink(self):
-        if self._audio_output == "AK4951":
+        # AK4951Sink injects audio into the HL2 EP2 frames — that path
+        # doesn't exist on P2 (Apache uses a separate DDC Audio UDP port,
+        # not in scope for v1). On P2 we always use the PC soundcard.
+        if self._audio_output == "AK4951" and self._protocol == "P1":
             return AK4951Sink(self._stream)
         try:
             return SoundDeviceSink(
