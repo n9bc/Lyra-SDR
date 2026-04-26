@@ -99,8 +99,23 @@ BYTES_PER_POINT = 8  # vec2 = 2 × float32
 # OpenGL constants we use directly (matches the GL spec values exactly
 # so they're stable across drivers / Qt versions). Imported here once
 # rather than scattered throughout paintGL bodies.
-GL_COLOR_BUFFER_BIT = 0x4000
-GL_LINE_STRIP       = 0x0003
+GL_COLOR_BUFFER_BIT      = 0x4000
+GL_LINE_STRIP            = 0x0003
+GL_TRIANGLE_STRIP        = 0x0005
+GL_FLOAT                 = 0x1406
+GL_RED                   = 0x1903
+GL_R8                    = 0x8229
+GL_UNSIGNED_BYTE         = 0x1401
+GL_TEXTURE_2D            = 0x0DE1
+GL_TEXTURE0              = 0x84C0
+GL_TEXTURE_MIN_FILTER    = 0x2801
+GL_TEXTURE_MAG_FILTER    = 0x2800
+GL_TEXTURE_WRAP_S        = 0x2802
+GL_TEXTURE_WRAP_T        = 0x2803
+GL_LINEAR                = 0x2601
+GL_NEAREST               = 0x2600
+GL_CLAMP_TO_EDGE         = 0x812F
+GL_UNPACK_ALIGNMENT      = 0x0CF5
 
 # Where the GLSL source files live, relative to this module.
 _SHADER_DIR = Path(__file__).resolve().parent / "spectrum_gpu_shaders"
@@ -424,3 +439,312 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._trace_xy[:n, 0] = xs
         self._trace_xy[:n, 1] = ys
         self._trace_n = n
+
+
+# ── Waterfall ─────────────────────────────────────────────────────────
+
+
+class WaterfallGpuWidget(QOpenGLWidget):
+    """GPU-rendered scrolling waterfall using texture streaming.
+
+    The "scroll" is done entirely in the fragment shader by varying
+    the texture sample row based on a `uRowOffset` uniform. CPU-side
+    we maintain a circular write pointer into a fixed-size 2D R8
+    texture; each new row is one glTexSubImage2D call covering one
+    row's pixels. Zero buffer scrolling, zero memmove cost.
+
+    Compare to the existing QPainter WaterfallWidget which does
+        self._data[1:] = self._data[:-1]
+    on every new row — a full ~10 MB memcpy per push on a typical
+    waterfall buffer. This widget's per-push cost is bounded by the
+    width of one row (~16 KB on a 4096-bin buffer) and is GPU-side.
+
+    Public API:
+        push_row(spec_db, min_db=-130, max_db=-30)
+            Append one new row to the top of the waterfall. dB →
+            byte mapping uses min_db/max_db as the dynamic range;
+            values outside the range are clipped.
+    """
+
+    # Number of rows in the texture. 600 matches the typical Lyra
+    # waterfall height. Allocated once at initializeGL — operator
+    # restart needed to change. Texture memory: ROW_COUNT * MAX_BINS
+    # bytes (~5 MB at 600×8192).
+    ROW_COUNT = 600
+
+    # How often to repaint while in synthetic-data mode.
+    _SYNTHETIC_HZ = 30
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFormat(lyra_gl_format())
+
+        # GL function table — bound in initializeGL.
+        self._gl: Optional[QOpenGLFunctions_4_3_Core] = None
+
+        # GPU resource handles.
+        self._prog: Optional[QOpenGLShaderProgram] = None
+        self._vbo: Optional[QOpenGLBuffer] = None
+        self._vao: Optional[QOpenGLVertexArrayObject] = None
+        self._tex_id: int = 0
+        # Cached locations.
+        self._loc_position: int = -1
+        self._loc_texcoord: int = -1
+        self._loc_row_offset: int = -1
+        self._loc_row_count: int = -1
+        self._loc_sampler: int = -1
+
+        # Circular buffer write state. _write_row points at the row
+        # we MOST RECENTLY wrote (the visual top of the waterfall).
+        # On each push it moves one row "up" with wrap-around. The
+        # fragment shader reads this via uRowOffset.
+        self._write_row: int = 0
+        # Number of valid rows pushed so far. Used to suppress the
+        # "show stale random GPU memory" effect during the first few
+        # frames — once we've pushed ROW_COUNT rows, the texture is
+        # fully populated.
+        self._rows_pushed: int = 0
+
+        # Row buffer used by push_row to convert dB → byte. Pre-
+        # allocated to MAX_BINS so push_row never allocates.
+        self._row_bytes = np.zeros(MAX_BINS, dtype=np.uint8)
+        # Number of bins in the most-recent push (used for partial
+        # texture uploads when the spectrum has fewer bins than the
+        # texture is wide).
+        self._last_row_n: int = 0
+
+        # Synthetic mode for self-test without a spectrum source.
+        self._synthetic_active = True
+        self._t0 = time.monotonic()
+        self._synth_timer = QTimer(self)
+        self._synth_timer.setInterval(int(1000 / self._SYNTHETIC_HZ))
+        self._synth_timer.timeout.connect(self._synthetic_tick)
+        self._synth_timer.start()
+
+    # ── Public data API ────────────────────────────────────────────
+
+    def push_row(self, spec_db: np.ndarray,
+                 min_db: float = -130.0,
+                 max_db: float = -30.0) -> None:
+        """Add one new row to the top of the waterfall.
+
+        spec_db: 1-D numpy array of dB values (one per FFT bin). May
+            be shorter than MAX_BINS — only the first n columns of
+            the texture row will be updated.
+        min_db/max_db: dynamic-range window. Values <= min_db map to
+            0 (darkest), values >= max_db map to 255 (brightest).
+        """
+        # Real data takes over — disable synthetic generator before
+        # we forward to the internal pusher (so the synthetic timer
+        # doesn't fight with caller-driven pushes).
+        if self._synthetic_active:
+            self._synthetic_active = False
+            self._synth_timer.stop()
+        self._push_row_internal(spec_db, min_db, max_db)
+
+    def _push_row_internal(self, spec_db: np.ndarray,
+                           min_db: float, max_db: float) -> None:
+        """The actual data pipeline shared between the public
+        push_row and the synthetic-mode timer. Doesn't touch the
+        synthetic-active flag or the synthetic timer."""
+        n = int(min(spec_db.shape[0], MAX_BINS))
+        if n < 2:
+            return
+        span = max(1e-6, max_db - min_db)
+        # Clip + scale to 0..255 byte range.
+        norm = ((spec_db[:n].astype(np.float32) - min_db) / span)
+        np.clip(norm, 0.0, 1.0, out=norm)
+        self._row_bytes[:n] = (norm * 255.0).astype(np.uint8)
+        self._last_row_n = n
+
+        # Move write pointer up one row with wrap-around. After this
+        # _write_row IS the position of the new (newest) row.
+        self._write_row = (self._write_row - 1) % self.ROW_COUNT
+        self._rows_pushed = min(self._rows_pushed + 1, self.ROW_COUNT)
+
+        # Mark a pending upload — actual glTexSubImage2D happens in
+        # paintGL where the GL context is current.
+        self._row_pending = True
+        self.update()
+
+    # ── QOpenGLWidget overrides ────────────────────────────────────
+
+    def initializeGL(self) -> None:
+        """Build the GPU resources: shader program, fullscreen quad
+        VBO+VAO, and the rolling-row 2D texture."""
+        self._gl = QOpenGLFunctions_4_3_Core()
+        self._gl.initializeOpenGLFunctions()
+
+        # ── Shader program ────────────────────────────────────────
+        if self._prog is not None:
+            self._prog.removeAllShaders()
+            self._prog.deleteLater()
+        prog = QOpenGLShaderProgram(self)
+        ok = (prog.addShaderFromSourceFile(
+                  QOpenGLShader.ShaderTypeBit.Vertex,
+                  str(_SHADER_DIR / "waterfall.vert"))
+              and prog.addShaderFromSourceFile(
+                  QOpenGLShader.ShaderTypeBit.Fragment,
+                  str(_SHADER_DIR / "waterfall.frag")))
+        if not ok:
+            raise RuntimeError(
+                "Waterfall shader compile failed:\n" + prog.log())
+        if not prog.link():
+            raise RuntimeError(
+                "Waterfall shader link failed:\n" + prog.log())
+        self._prog = prog
+        self._loc_position    = prog.attributeLocation("position")
+        self._loc_texcoord    = prog.attributeLocation("texcoord")
+        self._loc_row_offset  = prog.uniformLocation("uRowOffset")
+        self._loc_row_count   = prog.uniformLocation("uRowCount")
+        self._loc_sampler     = prog.uniformLocation("waterfallTex")
+
+        # ── Fullscreen quad VBO ───────────────────────────────────
+        # Interleaved: vec2 position + vec2 texcoord = 4 floats per
+        # vertex, stride 16 bytes. Four vertices for a triangle strip
+        # covering the whole NDC space. Texcoord.y goes 0 (top) to 1
+        # (bottom) so the shader's "newest at top" convention is
+        # correct without flipping anywhere.
+        if self._vbo is not None:
+            self._vbo.destroy()
+        self._vbo = QOpenGLBuffer(QOpenGLBuffer.Type.VertexBuffer)
+        self._vbo.setUsagePattern(QOpenGLBuffer.UsagePattern.StaticDraw)
+        self._vbo.create()
+        self._vbo.bind()
+        quad = np.array([
+            # x,    y,    u,    v
+            -1.0, -1.0,  0.0, 1.0,   # bottom-left
+             1.0, -1.0,  1.0, 1.0,   # bottom-right
+            -1.0,  1.0,  0.0, 0.0,   # top-left
+             1.0,  1.0,  1.0, 0.0,   # top-right
+        ], dtype=np.float32)
+        self._vbo.allocate(quad.tobytes(), quad.nbytes)
+
+        # ── VAO ───────────────────────────────────────────────────
+        if self._vao is not None:
+            self._vao.destroy()
+        self._vao = QOpenGLVertexArrayObject(self)
+        self._vao.create()
+        self._vao.bind()
+
+        prog.bind()
+        prog.enableAttributeArray(self._loc_position)
+        prog.setAttributeBuffer(self._loc_position, GL_FLOAT,
+                                0, 2, 16)   # offset 0, vec2, stride 16
+        prog.enableAttributeArray(self._loc_texcoord)
+        prog.setAttributeBuffer(self._loc_texcoord, GL_FLOAT,
+                                8, 2, 16)   # offset 8, vec2, stride 16
+        prog.release()
+
+        self._vao.release()
+        self._vbo.release()
+
+        # ── Texture ───────────────────────────────────────────────
+        # R8 single-channel texture. Width = MAX_BINS so any spectrum
+        # size up to that fits without re-allocating. Height = ROW_COUNT.
+        # Allocated empty; glTexSubImage2D fills rows as push_row fires.
+        gl = self._gl
+        # Generate one texture name. PySide's binding for glGenTextures
+        # returns the name when called with a count of 1.
+        ids = []
+        # PySide6 idiom: pre-allocate result list, pass to glGenTextures
+        import array
+        names = array.array('I', [0])
+        gl.glGenTextures(1, names)
+        self._tex_id = int(names[0])
+
+        gl.glBindTexture(GL_TEXTURE_2D, self._tex_id)
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)   # tight rows (no padding)
+        # Allocate texture storage. The `None` data pointer means
+        # "allocate but don't upload" — content is undefined until
+        # we push rows.
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_R8,
+                        MAX_BINS, self.ROW_COUNT,
+                        0, GL_RED, GL_UNSIGNED_BYTE, None)
+        # Linear filtering smooths the visual when zooming; nearest
+        # would give a blockier look. Wrap doesn't matter for our
+        # scheme but CLAMP_TO_EDGE is the safe default.
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        gl.glBindTexture(GL_TEXTURE_2D, 0)
+
+        self._row_pending = False
+
+    def resizeGL(self, w: int, h: int) -> None:
+        pass
+
+    def paintGL(self) -> None:
+        if self._gl is None or self._prog is None:
+            return
+
+        # Synthetic mode generates fake data on the timer, then this
+        # path uploads + draws.
+        gl = self._gl
+
+        # Upload a pending row if push_row was called since last frame.
+        if getattr(self, "_row_pending", False) and self._last_row_n > 0:
+            gl.glBindTexture(GL_TEXTURE_2D, self._tex_id)
+            gl.glTexSubImage2D(
+                GL_TEXTURE_2D, 0,
+                0, self._write_row,             # x, y in texture
+                self._last_row_n, 1,             # width, height (one row)
+                GL_RED, GL_UNSIGNED_BYTE,
+                bytes(self._row_bytes[:self._last_row_n].tobytes()),
+            )
+            gl.glBindTexture(GL_TEXTURE_2D, 0)
+            self._row_pending = False
+
+        # Clear + draw fullscreen quad.
+        gl.glClearColor(_BG_R, _BG_G, _BG_B, 1.0)
+        gl.glClear(GL_COLOR_BUFFER_BIT)
+
+        # Don't draw the textured quad until at least a few rows
+        # have been pushed — otherwise we'd display undefined GPU
+        # memory contents (could look like garbage TV static).
+        if self._rows_pushed < 1:
+            return
+
+        self._prog.bind()
+        # Bind texture to unit 0 + tell sampler uniform.
+        gl.glActiveTexture(GL_TEXTURE0)
+        gl.glBindTexture(GL_TEXTURE_2D, self._tex_id)
+        if self._loc_sampler >= 0:
+            self._prog.setUniformValue(self._loc_sampler, 0)
+        if self._loc_row_offset >= 0:
+            self._prog.setUniformValue(
+                self._loc_row_offset, float(self._write_row))
+        if self._loc_row_count >= 0:
+            self._prog.setUniformValue(
+                self._loc_row_count, float(self.ROW_COUNT))
+        self._vao.bind()
+        gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+        self._vao.release()
+        gl.glBindTexture(GL_TEXTURE_2D, 0)
+        self._prog.release()
+
+    # ── Internal: synthetic data generator (Phase A test only) ─────
+
+    def _synthetic_tick(self) -> None:
+        """Generate one row of synthetic waterfall data: a moving
+        gaussian bump on a noise floor. Visually obvious whether the
+        push_row + circular-buffer + GPU-sample path is working
+        end-to-end without needing a real spectrum source. Calls
+        _push_row_internal so synthetic mode stays active across
+        ticks (the public push_row would auto-disable us).
+        """
+        if not self._synthetic_active:
+            return
+        n = 4096
+        t = time.monotonic() - self._t0
+        # Noise floor
+        spec = np.random.normal(-110, 3, n).astype(np.float32)
+        # Moving gaussian bump scrolls left-right over time
+        center = int(n / 2 + math.sin(t * 0.5) * (n / 3))
+        width = 80
+        x = np.arange(n)
+        bump = 70 * np.exp(-((x - center) ** 2) / (2 * width * width))
+        spec += bump.astype(np.float32)
+        self._push_row_internal(spec, min_db=-130.0, max_db=-30.0)
+
