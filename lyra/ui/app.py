@@ -131,6 +131,34 @@ class MainWindow(QMainWindow):
             "padding: 0 8px;")
         self.statusBar().addPermanentWidget(self._version_label)
 
+        # ── DSP perf overlay (Phase 1a of GPU-FFT plan) ───────────────
+        # Tiny status-bar readout that surfaces FFT timing + tick rate.
+        # Hidden until the operator turns on View → Show DSP Performance,
+        # at which point Radio.perf_stats_changed begins firing at ~1 Hz
+        # and we update the label text. The display format is intentionally
+        # terse so it doesn't crowd the status bar:
+        #
+        #   FFT 2.3 ms · tick 5.1 ms · 30 Hz
+        #
+        # Once VulkanFFTBackend lands the format will gain a backend tag:
+        #
+        #   FFT (vulkan) 0.4 ms · tick 3.0 ms · 30 Hz
+        #
+        # so the operator can see at a glance which path is in use.
+        self._perf_label = _QLabel("")
+        self._perf_label.setStyleSheet(
+            "color: #4a8f7e; font-family: Consolas, monospace; "
+            "padding: 0 8px;")
+        self._perf_label.setToolTip(
+            "DSP performance — FFT time per frame · full tick time · "
+            "achieved rate. Toggle via View → Show DSP Performance.")
+        self._perf_label.setVisible(False)
+        self.statusBar().addPermanentWidget(self._perf_label)
+        self.radio.perf_stats_changed.connect(self._on_perf_stats)
+        # Sync visibility with Radio's persisted perf_enabled setting.
+        if self.radio.perf_enabled:
+            self._perf_label.setVisible(True)
+
         self._load_settings()
 
         # Auto-snapshot of settings on every launch — gives the operator
@@ -381,6 +409,25 @@ class MainWindow(QMainWindow):
             "until you save a new one.")
         clear_default.triggered.connect(self._clear_user_default_layout)
         view_menu.addAction(clear_default)
+
+        # ── DSP Performance overlay toggle (Phase 1a of GPU-FFT) ─────
+        # Surfaces the small status-bar readout that times the FFT
+        # path. Off by default in the released build — operators turn
+        # it on when they want baseline numbers (e.g. for a bug report
+        # or to compare CPU vs GPU once VulkanFFTBackend lands). Action
+        # is checkable so the menu item visibly reflects the toggle
+        # state; persisted in QSettings via Radio.set_perf_enabled.
+        view_menu.addSeparator()
+        self._perf_action = QAction("Show DSP Performance", self)
+        self._perf_action.setCheckable(True)
+        self._perf_action.setChecked(self.radio.perf_enabled)
+        self._perf_action.setToolTip(
+            "Display a small FFT timing readout in the status bar — "
+            "FFT time per frame, full tick time, achieved rate. Turns "
+            "on instrumentation in the DSP path; overhead is negligible "
+            "but not zero, so off by default.")
+        self._perf_action.toggled.connect(self._toggle_perf_overlay)
+        view_menu.addAction(self._perf_action)
 
         # Help menu — user guide + keyboard-shortcuts shortcut topic
         # + about. F1 opens the guide from anywhere.
@@ -1646,6 +1693,41 @@ class MainWindow(QMainWindow):
             "Your saved default layout has been removed.\n\n"
             "View → 'Restore my saved layout' will now report\n"
             "'no saved layout' until you save a new one.")
+
+    # ── DSP Performance overlay (Phase 1a of GPU-FFT) ────────────────
+    def _toggle_perf_overlay(self, on: bool):
+        """View → Show DSP Performance toggle handler. Drives both the
+        Radio's instrumentation flag (so the FFT path actually times
+        itself) and the status-bar label visibility. Persisted via
+        Radio.set_perf_enabled."""
+        self.radio.set_perf_enabled(bool(on))
+        self._perf_label.setVisible(bool(on))
+        if not on:
+            # Clear the label text so the previous numbers don't
+            # linger as a confusing freeze-frame after toggling off.
+            self._perf_label.setText("")
+
+    def _on_perf_stats(self, stats: dict):
+        """Render the perf snapshot into the status-bar label. Format
+        favors information density over prettiness — operators reading
+        this care about ms-per-frame and frame rate, not formatting.
+
+        Snapshot shape:
+            {"fft":  {"avg_ms": 2.3, "rate_hz": 30, ...},
+             "tick": {"avg_ms": 5.1, "rate_hz": 30, ...}}
+        """
+        try:
+            fft = stats.get("fft", {})
+            tick = stats.get("tick", {})
+            fft_ms = fft.get("avg_ms", 0.0)
+            tick_ms = tick.get("avg_ms", 0.0)
+            rate = tick.get("rate_hz", 0.0)
+            self._perf_label.setText(
+                f"FFT {fft_ms:5.2f} ms · tick {tick_ms:5.2f} ms · "
+                f"{rate:4.1f} Hz")
+        except Exception:
+            # Defensive — never let a status-bar update kill the UI.
+            self._perf_label.setText("")
 
     # ── Persistence ──────────────────────────────────────────────────
     def _migrate_legacy_settings(self):

@@ -5,6 +5,7 @@
 # build/README.md tracked — those are the build INPUTS.
 build/lyra/
 build/installer/
+build/_pyi/
 
 # ── Python ──────────────────────────────────────────────────────────
 __pycache__/
