@@ -1,8 +1,11 @@
 """openHPSDR Protocol 2 board-ID lookup.
 
 Source: openHPSDR Ethernet Protocol v4.4, Discovery Reply byte 11 ("Board
-Type"). When a new ID is seen in the wild (e.g. Apache Brick II — not
-listed in v4.4), add a row here.
+Type"). When a new ID is seen in the wild, add a row here. Note that
+some "ANAN-look-alike" homebrew transceivers (notably the Lin00bs /
+EU1SW Brick II) report themselves as Hermes-Lite (board ID 6) on the
+wire because they run Hermes-Lite gateware — they don't have a
+dedicated board ID, and pi-hpsdr / Thetis don't list one either.
 
 The `family` field lets higher layers group radios for UI purposes
 ("show all my Apache rigs") without scattering board-ID literals.
@@ -52,7 +55,11 @@ BOARDS: dict[int, BoardSpec] = {
     3:  BoardSpec(3,  "ANGELIA (ANAN-100D)",     "ANAN-100D",    "Apache",       384_000, 2, 2),
     4:  BoardSpec(4,  "ORION (ANAN-200D)",       "ANAN-200D",    "Apache",       384_000, 2, 2),
     5:  BoardSpec(5,  "ORION Mk II",             "ANAN-7000DLE", "Apache",       384_000, 2, 2),
-    6:  BoardSpec(6,  "Hermes Lite",             "HL2",          "HermesLite",   384_000, 1),
+    # Board ID 6 covers any Hermes-Lite-class gateware. Stock HL2
+    # firmware is P1-only, so anything reaching this row via P2
+    # discovery is in practice the Lin00bs / EU1SW Brick II (homebrew
+    # ANAN-10E look-alike running Hermes-Lite firmware with P2 support).
+    6:  BoardSpec(6,  "Hermes Lite",             "Hermes Lite",  "HermesLite",   384_000, 1),
     10: BoardSpec(10, "SATURN (ANAN-G2)",        "ANAN-G2",      "Apache",     1_536_000, 2, 2),
 }
 
@@ -61,9 +68,8 @@ def lookup_board(board_id: int) -> Optional[BoardSpec]:
     """Return the BoardSpec for `board_id`, or None if unknown.
 
     Unknown IDs are NOT an error — Apache may ship hardware ahead of
-    spec updates, and the Brick II row is expected to land here once
-    we observe its real ID. The caller decides how to render an
-    unknown board (we suggest "Unknown ANAN/Apache (id=N)").
+    spec updates. The caller decides how to render an unknown board
+    (we suggest "Unknown ANAN/Apache (id=N)").
     """
     return BOARDS.get(board_id)
 

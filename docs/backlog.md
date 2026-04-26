@@ -266,9 +266,11 @@ Source: ExpertSDR3 manual pp. 70-95. Full feature set for eventual parity.
       integration so the UI can pick a P2 radio from the connection
       dropdown; Phase 6 = TX over P2 (DUC, DUCIQ, mic-in routing). See
       `docs/superpowers/specs/2026-04-26-protocol-2-apache-design.md`.
-      Brick II's board ID is not in v4.4 spec; loopback handles unknown
-      IDs gracefully — actual ID gets added to `lyra/protocol/p2/boards.py`
-      once the user runs discovery against the real hardware.
+      Lin00bs / EU1SW Brick II is **not** a separate board ID — it's
+      a homebrew Hermes-Lite-gateware rig that identifies as board 6
+      (Hermes Lite) on the wire and rides the existing HL row. Variant
+      naming is handled by `boards.friendly_name()` based on firmware
+      version. See `docs/p2-bringup.md`.
       **REAL-HARDWARE GAP (2026-04-26)**: live test against an ANAN-G2
       with v4.3 firmware streamed zero IQ frames. Wire-capture vs
       pi-hpsdr cross-reference identified six fixes needed (phase-mode

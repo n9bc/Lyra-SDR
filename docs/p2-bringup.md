@@ -16,9 +16,10 @@ If you've never touched the P2 layer before, read
 - One of the following:
   - An Apache ANAN G2 (or any P2-capable Apache rig) on the same
     subnet as your PC, and the rig powered on.
-  - An Apache Brick II — same setup. Note we don't yet know the
-    Brick II's board ID; expect "Unknown(id=N)" in discovery and
-    please record the actual N for `boards.py`.
+  - A Lin00bs / EU1SW Brick II (or any other Hermes-Lite-derived
+    homebrew rig). It identifies itself as **Hermes Lite (board ID
+    6)** on the wire and is supported automatically — discovery
+    just reports `Hermes Lite`, no special handling needed.
   - Neither — use the loopback below instead.
 
 No new Python packages are needed; the P2 layer uses stdlib + numpy
@@ -103,9 +104,21 @@ py -3.14 -m unittest discover -s lyra/protocol/p2/tests -v
 
 47 tests, ~0 seconds. They never touch the network.
 
-## Reporting an unknown Brick II board ID
+## Brick II / Hermes-Lite homebrew rigs
 
-If discovery returns `Unknown(id=N)` for a Brick II:
+The Lin00bs / EU1SW "Brick II" is **not an Apache product** — it's a
+homebrew transceiver that mimics an ANAN-10E mechanically but runs
+Hermes-Lite gateware with P2 support. On the wire it presents as
+**board ID 6 (Hermes Lite)** and rides the same `BoardSpec(6, ...)`
+row as any HL-class board. Stock HL2 firmware is P1-only, so in
+practice anything that arrives via P2 discovery on board ID 6 is a
+Brick II — but since the wire format is identical, no special
+handling is needed and the discovery output just reports `Hermes Lite`.
+
+## Reporting a genuinely unknown board ID
+
+If discovery returns `Unknown(id=N)` for a board that's neither in our
+table nor a Hermes-Lite derivative:
 
 1. Re-run with `--raw` to capture the full 60-byte reply hex.
 2. Open an issue (or note for the maintainer) with:
@@ -114,6 +127,7 @@ If discovery returns `Unknown(id=N)` for a Brick II:
    - The radio model and firmware version
 3. We'll add the row to `lyra/protocol/p2/boards.py`.
 
-The discovery / stream code does NOT branch on board ID (yet) — it only
-uses the ID for display. So even an unknown ID still streams correctly
-as long as the radio speaks standard P2.
+The discovery / stream code branches on board ID for the DDC slot
+offset (Hermes-class = DDC0, ORION2-class = DDC2). An unknown ID
+defaults to DDC0; if the radio is actually Apache ORION-family it
+won't stream until we add the right offset.
