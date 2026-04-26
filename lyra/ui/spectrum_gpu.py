@@ -285,6 +285,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._gl = QOpenGLFunctions_4_3_Core()
         self._gl.initializeOpenGLFunctions()
 
+        # Hook context-destruction so we can release GPU resources
+        # while the GL context is still valid. Without this, Python's
+        # GC may run after Qt has torn down the context, producing
+        # "destroy called without current context" warnings (and in
+        # extreme cases leaking GPU memory until the process exits).
+        ctx = self.context()
+        if ctx is not None:
+            ctx.aboutToBeDestroyed.connect(self._cleanup_gl_resources)
+
         # ── Shader program ────────────────────────────────────────
         # If initializeGL fires again, drop any prior program first.
         if self._prog_trace is not None:
@@ -459,6 +468,29 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._trace_xy[:n, 1] = ys
         self._trace_n = n
 
+    # ── GL teardown ────────────────────────────────────────────────
+    def _cleanup_gl_resources(self) -> None:
+        """Release GPU resources while the GL context is still
+        current. Wired up in initializeGL via
+        QOpenGLContext.aboutToBeDestroyed. Without this hook,
+        Python's GC may call resource destructors AFTER Qt has torn
+        down the context, producing 'destroy called without current
+        context' warnings.
+
+        Idempotent — safe to call more than once. Re-runs are no-ops
+        because the destroy() calls null out the references.
+        """
+        if self._vbo_trace is not None:
+            self._vbo_trace.destroy()
+            self._vbo_trace = None
+        if self._vao_trace is not None:
+            self._vao_trace.destroy()
+            self._vao_trace = None
+        if self._prog_trace is not None:
+            self._prog_trace.removeAllShaders()
+            self._prog_trace.deleteLater()
+            self._prog_trace = None
+
 
 # ── Waterfall ─────────────────────────────────────────────────────────
 
@@ -602,6 +634,13 @@ class WaterfallGpuWidget(QOpenGLWidget):
         VBO+VAO, and the rolling-row 2D texture."""
         self._gl = QOpenGLFunctions_4_3_Core()
         self._gl.initializeOpenGLFunctions()
+
+        # Hook context destruction so we release GPU resources while
+        # the GL context is still valid (see SpectrumGpuWidget's
+        # _cleanup_gl_resources docstring for the full rationale).
+        ctx = self.context()
+        if ctx is not None:
+            ctx.aboutToBeDestroyed.connect(self._cleanup_gl_resources)
 
         # ── Shader program ────────────────────────────────────────
         if self._prog is not None:
@@ -806,4 +845,29 @@ class WaterfallGpuWidget(QOpenGLWidget):
         bump = 70 * np.exp(-((x - center) ** 2) / (2 * width * width))
         spec += bump.astype(np.float32)
         self._push_row_internal(spec, min_db=-130.0, max_db=-30.0)
+
+    # ── GL teardown ────────────────────────────────────────────────
+    def _cleanup_gl_resources(self) -> None:
+        """Release GPU resources while the GL context is still
+        current. Wired up in initializeGL via
+        QOpenGLContext.aboutToBeDestroyed. Without this hook the
+        QOpenGLTexture destructor logs 'destroy called without
+        current context' at process exit.
+
+        Idempotent — safe to call more than once.
+        """
+        if self._tex is not None:
+            self._tex.destroy()
+            self._tex = None
+            self._tex_id = 0
+        if self._vbo is not None:
+            self._vbo.destroy()
+            self._vbo = None
+        if self._vao is not None:
+            self._vao.destroy()
+            self._vao = None
+        if self._prog is not None:
+            self._prog.removeAllShaders()
+            self._prog.deleteLater()
+            self._prog = None
 
