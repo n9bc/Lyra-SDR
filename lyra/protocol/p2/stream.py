@@ -20,18 +20,21 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from lyra.protocol.p2.boards import lookup_board
 from lyra.protocol.p2.packets import (
+    DDC_IQ_FRAME_LEN_24BIT,
     DEFAULT_DDC_COMMAND_PORT,
-    DEFAULT_DDC_IQ_BASE_PORT,
+    DEFAULT_DUC_COMMAND_PORT,
     DEFAULT_DISCOVERY_PORT,
     DEFAULT_HIGH_PRIORITY_HOST_PORT,
     DdcConfig,
     GeneralPacketConfig,
     HighPriorityConfig,
     build_ddc_specific_packet,
+    build_duc_specific_packet,
     build_general_packet,
     build_high_priority_packet,
-    parse_ddc_iq_frame,
+    parse_ddc_iq_frames,
 )
 
 
@@ -65,9 +68,35 @@ class P2Stream:
 
     HIGH_PRIORITY_REFRESH_S = 1.0     # spec recommends periodic refresh
 
-    def __init__(self, radio_ip: str, sample_rate: int = 192_000):
+    def __init__(
+        self,
+        radio_ip: str,
+        sample_rate: int = 192_000,
+        *,
+        board_id: Optional[int] = None,
+    ):
+        """Open a P2 RX session against ``radio_ip``.
+
+        ``board_id`` is the value the radio reported in discovery
+        (byte 11 of the discovery reply). It controls which DDC slot
+        carries RX1: Hermes / Atlas / Hermes-Lite use DDC0; ANGELIA /
+        ORION / ORION-MkII / SATURN reserve DDC0+DDC1 internally and
+        start user receivers at DDC2. Passing ``None`` defaults to
+        DDC0 (Hermes-class behavior) — works with the synthetic
+        loopback and any pre-Apache board, but produces zero IQ
+        frames against a real ANAN-G2.
+        """
         self.radio_ip = radio_ip
         self.sample_rate = sample_rate
+        self.board_id = board_id
+
+        # Pick the DDC slot for RX1 from the board table. Unknown
+        # boards fall back to DDC0 — which is what the loopback uses.
+        self._rx1_ddc_index = 0
+        if board_id is not None:
+            spec = lookup_board(board_id)
+            if spec is not None:
+                self._rx1_ddc_index = spec.ddc_offset_for_rx1
 
         # Sockets — opened in start(), closed in stop()
         self._send_sock: Optional[socket.socket] = None
@@ -82,6 +111,7 @@ class P2Stream:
         # Sequence counters (one per host→radio port, per spec).
         self._seq_general = 0
         self._seq_ddc_specific = 0
+        self._seq_duc_specific = 0
         self._seq_high_priority = 0
 
         # Latest known control state — held here so the periodic refresh
@@ -107,20 +137,33 @@ class P2Stream:
         self._stop_event.clear()
         self.stats = P2FrameStats()
 
+        # Apache firmware uses the SOURCE port of incoming control packets
+        # as the IQ destination, ignoring the port declared in the
+        # General Packet body. Verified against ANAN-G2 wire capture vs
+        # Thetis (Thetis declared body=1035 but the radio sent IQ back
+        # to Thetis's source port 51538). To match that behavior we use
+        # a single shared socket for sending control packets and
+        # receiving IQ — the OS-assigned ephemeral source port becomes
+        # the IQ destination automatically.
         self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Big recv buffer so NIC-coalesced 4-8x1444 IQ frames fit in one recv.
+        self._send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262_144)
         self._send_sock.bind(("0.0.0.0", 0))
-
-        self._iq_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self._iq_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._iq_sock.bind(("0.0.0.0", 0))
-        self._iq_sock.settimeout(0.5)
-        self._iq_local_port = self._iq_sock.getsockname()[1]
+        self._send_sock.settimeout(0.5)
+        self._iq_sock = self._send_sock                        # alias
+        self._iq_local_port = self._send_sock.getsockname()[1]
+        # Loopback path still honors the declared body port; real Apache
+        # ignores it. Set body = local_port - rx1_ddc_index so the
+        # synthetic loopback can still compute (base + ddc) = local_port.
+        iq_base_port = self._iq_local_port - self._rx1_ddc_index
 
         # 1. General Packet — declare the local port the radio should use
-        #    as the destination for DDC0 IQ data.
+        #    as the IQ base, plus the Apache "magic" bytes (phase mode,
+        #    HW timer, PA enable, dual-Alex enable) baked into the
+        #    GeneralPacketConfig defaults.
         gen_cfg = GeneralPacketConfig(
-            ddc_iq_destination_port=self._iq_local_port,
+            ddc_iq_destination_port=iq_base_port,
             high_priority_from_pc_port=DEFAULT_HIGH_PRIORITY_HOST_PORT,
             ddc_command_port=DEFAULT_DDC_COMMAND_PORT,
         )
@@ -130,25 +173,44 @@ class P2Stream:
         )
         self._seq_general += 1
 
-        # 2. DDC Specific — enable DDC0 only, single ADC, 24-bit, requested rate.
+        # 2. DDC Specific — enable RX1's DDC slot at the requested rate.
         ddc_cfg = DdcConfig(
             adc_source=0,
             sample_rate_hz=self.sample_rate,
             sample_size_bits=24,
         )
+        # ANAN-G2 has 2 ADCs; pre-Apache boards have 1. Default to the
+        # board's count if known, else 1.
+        n_adcs = 1
+        if self.board_id is not None:
+            spec = lookup_board(self.board_id)
+            if spec is not None:
+                n_adcs = spec.n_adcs
+        # Apache (DDC2-offset boards) ships dither on ADC0+1+2; Hermes-
+        # class radios just leave it off. Matches Thetis byte 5 = 0x07.
+        dither = 0x07 if self._rx1_ddc_index >= 2 else 0x00
         self._send(
             build_ddc_specific_packet(
                 self._seq_ddc_specific,
-                n_adcs=1,
-                ddc_enable_mask=0x01,
-                ddcs={0: ddc_cfg},
+                n_adcs=n_adcs,
+                dither_mask=dither,
+                ddc_enable_mask=(1 << self._rx1_ddc_index),
+                ddcs={self._rx1_ddc_index: ddc_cfg},
             ),
             DEFAULT_DDC_COMMAND_PORT,
         )
         self._seq_ddc_specific += 1
 
-        # 3. High Priority — set RX1 freq, run=True. Spec note: the radio
-        #    starts streaming when it has run=1 plus DDC0 enabled.
+        # 3. DUC Specific — pi-hpsdr always sends this at startup (even
+        #    RX-only). Apache FPGA wants a DUC config before it fully
+        #    arms the streaming engine.
+        self._send(
+            build_duc_specific_packet(self._seq_duc_specific),
+            DEFAULT_DUC_COMMAND_PORT,
+        )
+        self._seq_duc_specific += 1
+
+        # 4. High Priority — set RX1 freq, run=True.
         self._send_high_priority_locked()
 
         # Launch worker threads.
@@ -175,7 +237,7 @@ class P2Stream:
                 with self._high_priority_lock:
                     cfg = HighPriorityConfig(
                         run=False,
-                        ddc_freqs_hz={0: self._rx_freq_hz},
+                        ddc_freqs_hz={self._rx1_ddc_index: self._rx_freq_hz},
                     )
                     self._send_sock.sendto(
                         build_high_priority_packet(self._seq_high_priority, cfg),
@@ -190,12 +252,11 @@ class P2Stream:
         if self._refresh_thread is not None:
             self._refresh_thread.join(timeout=2.0)
 
-        if self._iq_sock is not None:
-            self._iq_sock.close()
-            self._iq_sock = None
+        # _iq_sock is an alias of _send_sock — close once.
         if self._send_sock is not None:
             self._send_sock.close()
             self._send_sock = None
+            self._iq_sock = None
 
     def set_rx_freq_hz(self, hz: int) -> None:
         """Re-tune RX1 (DDC0). Sends a fresh High Priority packet."""
@@ -206,17 +267,22 @@ class P2Stream:
             self._send_high_priority_locked()
 
     def set_sample_rate(self, rate: int) -> None:
-        """Change the DDC0 sample rate on a running stream."""
+        """Change RX1's DDC sample rate on a running stream."""
         self.sample_rate = rate
         if self._send_sock is None:
             return
         ddc_cfg = DdcConfig(adc_source=0, sample_rate_hz=rate, sample_size_bits=24)
+        n_adcs = 1
+        if self.board_id is not None:
+            spec = lookup_board(self.board_id)
+            if spec is not None:
+                n_adcs = spec.n_adcs
         self._send(
             build_ddc_specific_packet(
                 self._seq_ddc_specific,
-                n_adcs=1,
-                ddc_enable_mask=0x01,
-                ddcs={0: ddc_cfg},
+                n_adcs=n_adcs,
+                ddc_enable_mask=(1 << self._rx1_ddc_index),
+                ddcs={self._rx1_ddc_index: ddc_cfg},
             ),
             DEFAULT_DDC_COMMAND_PORT,
         )
@@ -248,9 +314,21 @@ class P2Stream:
         """Caller MUST hold self._high_priority_lock."""
         if self._send_sock is None:
             return
+        # Write the RX1 frequency into DDC0/DDC1/RX1's slot. Thetis does
+        # this on ANAN-G2 even though only the active DDC streams — the
+        # firmware appears to use DDC0 as a fallback tuning state, and
+        # without it the IQ pipeline doesn't arm. Cheap to do for all
+        # boards (extra zero writes are harmless on Hermes-class).
+        ddc_freqs = {0: self._rx_freq_hz, 1: self._rx_freq_hz}
+        ddc_freqs[self._rx1_ddc_index] = self._rx_freq_hz
         cfg = HighPriorityConfig(
             run=True,
-            ddc_freqs_hz={0: self._rx_freq_hz},
+            ddc_freqs_hz=ddc_freqs,
+            # Captured Thetis Alex words for an idle ANAN-G2 on 20 m.
+            # Future work: derive per-band from the current frequency.
+            alex0_word=0x01100010 if self._rx1_ddc_index >= 2 else 0,
+            alex1_word=0x01100002 if self._rx1_ddc_index >= 2 else 0,
+            open_collector_outputs=0x90 if self._rx1_ddc_index >= 2 else 0,
         )
         self._send_sock.sendto(
             build_high_priority_packet(self._seq_high_priority, cfg),
@@ -263,35 +341,41 @@ class P2Stream:
 
     def _rx_loop(self, on_samples: Callable[[np.ndarray, P2FrameStats], None]) -> None:
         assert self._iq_sock is not None
+        # Big enough to hold up to ~5 native 1444-byte frames if the NIC
+        # coalesces them (Windows RSC, Linux UDP-GRO).
+        recv_size = DDC_IQ_FRAME_LEN_24BIT * 8
         while not self._stop_event.is_set():
             try:
-                data, _addr = self._iq_sock.recvfrom(2048)
+                data, _addr = self._iq_sock.recvfrom(recv_size)
             except socket.timeout:
                 continue
+            except ConnectionResetError:
+                # Windows surfaces ICMP "port unreachable" from a previous
+                # send as ECONNRESET on the next recvfrom. Common while
+                # the radio is starting up its listeners — keep going.
+                continue
             except OSError:
+                # Socket truly closed (stop() ran). Exit.
                 break
 
-            frame = parse_ddc_iq_frame(data)
-            if frame is None:
-                continue
+            for frame in parse_ddc_iq_frames(data):
+                if self.stats.seq_expected == -1:
+                    self.stats.seq_expected = (frame.seq + 1) & 0xFFFFFFFF
+                else:
+                    if frame.seq != self.stats.seq_expected:
+                        self.stats.seq_errors += 1
+                    self.stats.seq_expected = (frame.seq + 1) & 0xFFFFFFFF
 
-            if self.stats.seq_expected == -1:
-                self.stats.seq_expected = (frame.seq + 1) & 0xFFFFFFFF
-            else:
-                if frame.seq != self.stats.seq_expected:
-                    self.stats.seq_errors += 1
-                self.stats.seq_expected = (frame.seq + 1) & 0xFFFFFFFF
+                self.stats.frames += 1
+                self.stats.samples += frame.samples_per_frame
+                self.stats.last_timestamp = frame.timestamp
 
-            self.stats.frames += 1
-            self.stats.samples += frame.samples_per_frame
-            self.stats.last_timestamp = frame.timestamp
-
-            try:
-                on_samples(frame.samples, self.stats)
-            except Exception as exc:
-                # Don't let consumer exceptions kill the RX thread —
-                # just log via print (matches HL2Stream's defensive style)
-                print(f"[p2.stream] on_samples raised: {exc!r}")
+                try:
+                    on_samples(frame.samples, self.stats)
+                except Exception as exc:
+                    # Don't let consumer exceptions kill the RX thread —
+                    # just log via print (matches HL2Stream's defensive style)
+                    print(f"[p2.stream] on_samples raised: {exc!r}")
 
     def _refresh_loop(self) -> None:
         """Re-send the High Priority packet ~once per second so the radio's
@@ -318,9 +402,14 @@ if __name__ == "__main__":
                         help="RX1 (DDC0) frequency in Hz")
     parser.add_argument("--seconds", type=float, default=10.0,
                         help="How long to stream before stopping")
+    parser.add_argument("--board-id", type=int, default=None,
+                        help="Discovery byte-11 board ID. Defaults to None "
+                             "(DDC0 / Hermes-class). Use 10 for ANAN-G2 / "
+                             "SATURN, 5 for ORION-MkII, etc. — picks the "
+                             "right DDC slot for the board.")
     args = parser.parse_args()
 
-    stream = P2Stream(args.ip, sample_rate=args.rate)
+    stream = P2Stream(args.ip, sample_rate=args.rate, board_id=args.board_id)
 
     def _on_samples(samples, stats):
         # Quiet — main loop prints periodic summary.

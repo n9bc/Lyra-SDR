@@ -134,19 +134,31 @@ class HighPriorityTest(unittest.TestCase):
         self.assertEqual(pkt[4], 0x01 | 0x02 | 0x08)
 
     def test_ddc0_freq_at_offset_9(self) -> None:
+        # Phase mode (Apache default) — wire value is the phase increment,
+        # not raw Hz. 14.250 MHz → 0x1DB00000 at 122.88 MHz sample clock.
         pkt = build_high_priority_packet(
             seq=0,
             cfg=HighPriorityConfig(run=True, ddc_freqs_hz={0: 14_250_000}),
         )
-        self.assertEqual(struct.unpack(">I", pkt[9:13])[0], 14_250_000)
+        self.assertEqual(struct.unpack(">I", pkt[9:13])[0], 0x1DB00000)
         # DDC1 freq slot must remain zero.
         self.assertEqual(struct.unpack(">I", pkt[13:17])[0], 0)
+
+    def test_ddc0_freq_raw_hz_when_phase_mode_off(self) -> None:
+        # Hz mode (legacy / loopback) — wire value matches the input verbatim.
+        pkt = build_high_priority_packet(
+            seq=0,
+            cfg=HighPriorityConfig(
+                run=True, phase_mode=False, ddc_freqs_hz={0: 14_250_000},
+            ),
+        )
+        self.assertEqual(struct.unpack(">I", pkt[9:13])[0], 14_250_000)
 
     def test_ddc1_freq_at_offset_13(self) -> None:
         pkt = build_high_priority_packet(
             seq=0,
             cfg=HighPriorityConfig(
-                run=True,
+                run=True, phase_mode=False,
                 ddc_freqs_hz={0: 7_200_000, 1: 14_074_000},
             ),
         )
@@ -167,11 +179,22 @@ class HighPriorityTest(unittest.TestCase):
         self.assertEqual(pkt[1403], 0x03)
 
     def test_freq_out_of_range(self) -> None:
+        # Phase mode rejects freqs above the radio sample clock (122.88 MHz).
         with self.assertRaises(ValueError):
             build_high_priority_packet(
                 seq=0,
-                cfg=HighPriorityConfig(ddc_freqs_hz={0: 0x100000000}),
+                cfg=HighPriorityConfig(ddc_freqs_hz={0: 200_000_000}),
             )
+
+    def test_alex_words(self) -> None:
+        pkt = build_high_priority_packet(
+            seq=0,
+            cfg=HighPriorityConfig(
+                run=True, alex0_word=0x01100010, alex1_word=0x01100002,
+            ),
+        )
+        self.assertEqual(struct.unpack(">I", pkt[1428:1432])[0], 0x01100002)
+        self.assertEqual(struct.unpack(">I", pkt[1432:1436])[0], 0x01100010)
 
 
 if __name__ == "__main__":

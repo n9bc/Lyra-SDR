@@ -35,6 +35,22 @@ DEFAULT_DISCOVERY_PORT = 1024
 DEFAULT_DDC_COMMAND_PORT = 1025
 DEFAULT_HIGH_PRIORITY_HOST_PORT = 1027
 
+RADIO_SAMPLE_CLOCK_HZ = 122_880_000
+
+
+def _phase_to_freq(phase: int) -> int:
+    """Decode a 32-bit phase increment back to Hz (122.88 MHz clock)."""
+    return int(round(phase * RADIO_SAMPLE_CLOCK_HZ / (1 << 32)))
+
+
+def _lowest_enabled_ddc(enable_byte: int) -> int:
+    """Return the lowest DDC index whose enable bit is set in byte 7,
+    or -1 if no bit is set. Mirrors how a real radio walks the mask."""
+    for i in range(8):
+        if enable_byte & (1 << i):
+            return i
+    return -1
+
 
 def _build_discovery_reply(*, mac: bytes = b"\x02\x00\xDE\xAD\xBE\xEF",
                            board_id: int = 10) -> bytes:
@@ -70,10 +86,14 @@ class P2Loopback:
         self._threads: list[threading.Thread] = []
 
         # State updated by control packets, read by the streaming thread.
-        self._client_iq_addr: Optional[tuple[str, int]] = None
+        # `_active_ddc` tracks which DDC slot the host enabled (0 for
+        # Hermes-class clients, 2 for ORION2-flavored clients) so the
+        # IQ stream lands at the correct (base + ddc) port.
+        self._client_iq_base: Optional[tuple[str, int]] = None
         self._sample_rate_hz = 192_000
         self._running = False
         self._rx_freq_hz = 0
+        self._active_ddc = 0
         self._state_lock = threading.Lock()
 
         self._iq_seq = 0  # per-port counter for DDC0 IQ stream
@@ -140,16 +160,17 @@ class P2Loopback:
                     print(f"[loopback] discovery from {addr}, replying as SATURN")
                 sock.sendto(_build_discovery_reply(mac=self._mac), addr)
             elif cmd == 0x00 and len(data) >= 19:
-                ddc0_iq_port = struct.unpack(">H", data[17:19])[0]
-                if ddc0_iq_port:
+                ddc_iq_base_port = struct.unpack(">H", data[17:19])[0]
+                if ddc_iq_base_port:
                     with self._state_lock:
-                        self._client_iq_addr = (addr[0], ddc0_iq_port)
+                        self._client_iq_base = (addr[0], ddc_iq_base_port)
                     if self.verbose:
                         print(f"[loopback] general packet from {addr}, "
-                              f"DDC0 IQ → {addr[0]}:{ddc0_iq_port}")
+                              f"DDC IQ base -> {addr[0]}:{ddc_iq_base_port}")
 
     def _listen_ddc_cmd(self) -> None:
-        """Port 1025: DDC Specific. Read DDC0 sample rate (bytes 18-19)."""
+        """Port 1025: DDC Specific. Pick the lowest enabled DDC from byte 7
+        and read its config block (sample rate at +1/+2 of 17 + ddc*6)."""
         sock = self._sock_ddc_cmd
         assert sock is not None
         while not self._stop.is_set():
@@ -159,16 +180,26 @@ class P2Loopback:
                 continue
             except OSError:
                 return
-            if len(data) >= 20:
-                rate_khz = struct.unpack(">H", data[18:20])[0]
-                if rate_khz:
-                    with self._state_lock:
-                        self._sample_rate_hz = rate_khz * 1000
-                    if self.verbose:
-                        print(f"[loopback] DDC0 rate set to {rate_khz} kHz")
+            if len(data) < 35:
+                continue
+            ddc = _lowest_enabled_ddc(data[7])
+            if ddc < 0:
+                continue
+            block = 17 + ddc * 6
+            if len(data) < block + 6:
+                continue
+            rate_khz = struct.unpack(">H", data[block + 1:block + 3])[0]
+            if rate_khz:
+                with self._state_lock:
+                    self._active_ddc = ddc
+                    self._sample_rate_hz = rate_khz * 1000
+                if self.verbose:
+                    print(f"[loopback] DDC{ddc} rate set to {rate_khz} kHz")
 
     def _listen_high_priority(self) -> None:
-        """Port 1027: High Priority. Read run bit (byte 4 bit 0) and DDC0 freq (bytes 9-12)."""
+        """Port 1027: High Priority. Read run bit (byte 4 bit 0) and the
+        active DDC's tune word (bytes 9 + ddc*4 .. +3). The tune word is
+        a 32-bit phase increment on Apache; decode back to Hz for display."""
         sock = self._sock_high_priority
         assert sock is not None
         while not self._stop.is_set():
@@ -178,15 +209,23 @@ class P2Loopback:
                 continue
             except OSError:
                 return
-            if len(data) >= 13:
-                run_bit = bool(data[4] & 0x01)
-                freq = struct.unpack(">I", data[9:13])[0]
-                with self._state_lock:
-                    prev = (self._running, self._rx_freq_hz)
-                    self._running = run_bit
-                    self._rx_freq_hz = freq
-                if self.verbose and (prev[0] != run_bit or prev[1] != freq):
-                    print(f"[loopback] HP: run={run_bit}, freq={freq} Hz")
+            if len(data) < 13:
+                continue
+            with self._state_lock:
+                ddc = self._active_ddc
+            freq_off = 9 + ddc * 4
+            if len(data) < freq_off + 4:
+                continue
+            run_bit = bool(data[4] & 0x01)
+            wire_value = struct.unpack(">I", data[freq_off:freq_off + 4])[0]
+            freq = _phase_to_freq(wire_value)
+            with self._state_lock:
+                prev = (self._running, self._rx_freq_hz)
+                self._running = run_bit
+                self._rx_freq_hz = freq
+            if self.verbose and (prev[0] != run_bit or prev[1] != freq):
+                print(f"[loopback] HP: run={run_bit}, "
+                      f"DDC{ddc} phase=0x{wire_value:08X} ~ {freq} Hz")
 
     # ─── synthetic IQ streamer ───────────────────────────────────────────
 
@@ -199,15 +238,22 @@ class P2Loopback:
         offset_hz = 5_000.0
         phase = 0.0
         timestamp = 0
+        sent = 0
         while not self._stop.is_set():
             with self._state_lock:
                 running = self._running
                 rate = self._sample_rate_hz
-                addr = self._client_iq_addr
+                base = self._client_iq_base
+                active_ddc = self._active_ddc
 
-            if not (running and addr):
+            if not (running and base):
                 time.sleep(0.05)
                 continue
+            # The radio sends DDC[i] to (base + i). For ORION2-flavored
+            # clients that enabled DDC2, that's port (base + 2).
+            addr = (base[0], base[1] + active_ddc)
+            if sent == 0 and self.verbose:
+                print(f"[loopback] streaming -> {addr}", flush=True)
 
             packet_period = n / rate
 
@@ -241,8 +287,10 @@ class P2Loopback:
                 # bound sockets works; the destination IP/port is what matters.
                 if self._sock_high_priority is not None:
                     self._sock_high_priority.sendto(bytes(pkt), addr)
-            except OSError:
-                pass
+                    sent += 1
+            except OSError as exc:
+                if self.verbose and sent < 3:
+                    print(f"[loopback] sendto failed: {exc!r}", flush=True)
 
             self._iq_seq = (self._iq_seq + 1) & 0xFFFFFFFF
             timestamp += n
