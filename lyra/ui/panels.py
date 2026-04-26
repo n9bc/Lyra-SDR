@@ -2467,14 +2467,13 @@ class WaterfallPanel(GlassPanel):
 
     # ── GPU waterfall (BACKEND_GPU_OPENGL) ─────────────────────────
     def _setup_gpu_waterfall(self) -> None:
-        """Phase B.2 minimal wiring for WaterfallGpuWidget. Connects
-        only the signals the GPU widget understands today:
+        """Phase B.2/B.3 wiring for WaterfallGpuWidget. Connects:
 
-          - waterfall_ready → push_row (with dB range)
+          - waterfall_ready          → push_row (with dB range)
+          - palette (seed + change)  → set_palette (256x3 LUT upload)
 
         DELIBERATELY NOT WIRED:
           - notches overlay (no shader pass yet)
-          - palette LUT (Phase B.3+ — currently grayscale)
           - click-to-tune, right-click menu, wheel notch-Q
           - tuning-aware redraws (no center/rate display)
         """
@@ -2482,10 +2481,31 @@ class WaterfallPanel(GlassPanel):
         self.widget = WaterfallGpuWidget()
         self.content_layout().addWidget(self.widget)
         self.radio.waterfall_ready.connect(self._gpu_on_waterfall_ready)
+        # Seed the palette from Radio's current selection, and track
+        # changes so the operator's Settings → Visuals → Palette
+        # combo flips the waterfall colors live (one 768-byte texture
+        # update — visible on the very next frame).
+        self._gpu_apply_palette(self.radio.waterfall_palette)
+        self.radio.waterfall_palette_changed.connect(
+            self._gpu_apply_palette)
 
     def _gpu_on_waterfall_ready(self, spec_db, center_hz, rate):
         lo, hi = self.radio.waterfall_db_range
         self.widget.push_row(spec_db, min_db=lo, max_db=hi)
+
+    def _gpu_apply_palette(self, name: str) -> None:
+        """Look up the palette by name in lyra.ui.palettes and push
+        the 256x3 RGB array into the widget. No-op if the name is
+        unknown — Radio falls back to 'Classic' anyway."""
+        try:
+            from lyra.ui.palettes import PALETTES
+        except ImportError:
+            return
+        arr = PALETTES.get(name)
+        if arr is None:
+            arr = PALETTES.get("Classic")
+        if arr is not None:
+            self.widget.set_palette(arr)
 
     # ── QPainter waterfall (BACKEND_SOFTWARE / BACKEND_OPENGL) ─────
     def _setup_qpainter_waterfall(self) -> None:

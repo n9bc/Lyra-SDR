@@ -23,16 +23,17 @@
 
 in vec2 v_texcoord;     // x: 0..1 left→right, y: 0..1 TOP→bottom
 
-uniform sampler2D waterfallTex;
-uniform float uRowOffset;   // physical-row index of NEWEST data
-uniform float uRowCount;    // total rows in the texture
-uniform float uTexUMax;     // valid u range (= n_used / texture_width).
-                            // Texture is allocated MAX_BINS wide for
-                            // headroom but only the first n columns
-                            // ever get uploaded. Without this scale,
-                            // the right portion of the screen would
-                            // sample uninitialized texture territory
-                            // and render black.
+uniform sampler2D waterfallTex;     // R8, rolling spectrum data
+uniform sampler2D paletteTex;       // RGB8, 256-entry color LUT (256x1)
+uniform float uRowOffset;           // physical-row index of NEWEST data
+uniform float uRowCount;            // total rows in the texture
+uniform float uTexUMax;             // valid u range (= n_used / texture_width).
+                                    // Texture is allocated MAX_BINS wide for
+                                    // headroom but only the first n columns
+                                    // ever get uploaded. Without this scale,
+                                    // the right portion of the screen would
+                                    // sample uninitialized texture territory
+                                    // and render black.
 
 out vec4 fragColor;
 
@@ -49,8 +50,11 @@ void main()
     // Sample at the centre of the texel to avoid bleed between rows
     // when GL_LINEAR filtering is on.
     vec2 uv = vec2(u, (row + 0.5) / uRowCount);
-    float v = texture(waterfallTex, uv).r;
-    // Phase A.4: grayscale output. Phase B replaces this with a
-    // palette LUT lookup (texture(uPaletteTex, vec2(v, 0.5)).rgb).
-    fragColor = vec4(v, v, v, 1.0);
+    float v = texture(waterfallTex, uv).r;     // 0..1 normalized strength
+    // Look up color via the palette LUT. Palette is a 256x1 RGB
+    // texture; sampling at v.x picks the palette entry, y=0.5 hits
+    // the center of the single row. GL_LINEAR filtering on the
+    // palette gives smooth gradients between the 256 stops.
+    vec3 color = texture(paletteTex, vec2(v, 0.5)).rgb;
+    fragColor = vec4(color, 1.0);
 }

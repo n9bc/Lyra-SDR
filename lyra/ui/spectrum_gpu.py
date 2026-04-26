@@ -572,12 +572,24 @@ class WaterfallGpuWidget(QOpenGLWidget):
         # raw calls.
         self._tex: Optional[QOpenGLTexture] = None
         self._tex_id: int = 0
+        # Palette LUT texture — 256x1 RGB. Holds the currently
+        # active color palette from lyra.ui.palettes. Bound to
+        # texture unit 1 in paintGL; sampled in waterfall.frag via
+        # the paletteTex sampler uniform.
+        self._palette_tex: Optional[QOpenGLTexture] = None
+        # Latest palette data the operator picked, as a 256x3 uint8
+        # numpy array. None means "use a built-in fallback gradient
+        # at first paint." set_palette() updates this; the upload
+        # happens in paintGL when _palette_dirty is True.
+        self._palette_data: Optional[np.ndarray] = None
+        self._palette_dirty: bool = False
         # Cached locations.
         self._loc_position: int = -1
         self._loc_texcoord: int = -1
         self._loc_row_offset: int = -1
         self._loc_row_count: int = -1
         self._loc_sampler: int = -1
+        self._loc_palette: int = -1
         self._loc_tex_u_max: int = -1
 
         # Circular buffer write state. _write_row points at the row
@@ -610,6 +622,33 @@ class WaterfallGpuWidget(QOpenGLWidget):
             self._synth_timer.start()
 
     # ── Public data API ────────────────────────────────────────────
+
+    def set_palette(self, palette_rgb: np.ndarray) -> None:
+        """Set the waterfall color palette.
+
+        palette_rgb: (256, 3) uint8 numpy array of RGB values, as
+            produced by lyra.ui.palettes._build(). The shape is
+            checked defensively; non-conforming inputs are ignored
+            with a console warning rather than crashing the widget
+            mid-stream.
+
+        The actual GPU upload happens lazily in paintGL — we just
+        stash the data + mark dirty here. That way set_palette is
+        safe to call from any thread context (the GL upload always
+        runs on the Qt main thread inside paintGL).
+        """
+        try:
+            arr = np.asarray(palette_rgb, dtype=np.uint8)
+        except (ValueError, TypeError) as e:
+            print(f"WaterfallGpuWidget.set_palette: bad input - {e}")
+            return
+        if arr.shape != (256, 3):
+            print(f"WaterfallGpuWidget.set_palette: expected (256,3), "
+                  f"got {arr.shape}")
+            return
+        self._palette_data = arr.copy()  # defensive copy
+        self._palette_dirty = True
+        self.update()
 
     def push_row(self, spec_db: np.ndarray,
                  min_db: float = -130.0,
@@ -694,6 +733,7 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._loc_row_count   = prog.uniformLocation("uRowCount")
         self._loc_sampler     = prog.uniformLocation("waterfallTex")
         self._loc_tex_u_max   = prog.uniformLocation("uTexUMax")
+        self._loc_palette     = prog.uniformLocation("paletteTex")
 
         # ── Fullscreen quad VBO ───────────────────────────────────
         # Interleaved: vec2 position + vec2 texcoord = 4 floats per
@@ -761,6 +801,41 @@ class WaterfallGpuWidget(QOpenGLWidget):
             QOpenGLTexture.PixelType.UInt8)
         self._tex_id = int(self._tex.textureId())
 
+        # ── Palette LUT texture (256 × 1, RGB) ─────────────────────
+        # Holds the operator's chosen color palette. Sampled by the
+        # fragment shader via the paletteTex sampler. Uses GL_LINEAR
+        # so the 256 discrete stops render as smooth gradients.
+        if self._palette_tex is not None:
+            self._palette_tex.destroy()
+            self._palette_tex = None
+        self._palette_tex = QOpenGLTexture(QOpenGLTexture.Target.Target2D)
+        self._palette_tex.setFormat(QOpenGLTexture.TextureFormat.RGB8_UNorm)
+        self._palette_tex.setSize(256, 1)
+        self._palette_tex.setMinificationFilter(QOpenGLTexture.Filter.Linear)
+        self._palette_tex.setMagnificationFilter(QOpenGLTexture.Filter.Linear)
+        self._palette_tex.setWrapMode(QOpenGLTexture.WrapMode.ClampToEdge)
+        self._palette_tex.allocateStorage(
+            QOpenGLTexture.PixelFormat.RGB,
+            QOpenGLTexture.PixelType.UInt8)
+        # If set_palette was called BEFORE initializeGL (e.g., panels.py
+        # seeds the palette from radio.waterfall_palette right after
+        # widget construction, before the widget has been shown), the
+        # palette data is already stashed and just needs an upload.
+        # Mark dirty so the next paintGL pushes it.
+        if self._palette_data is not None:
+            self._palette_dirty = True
+        else:
+            # No palette set yet — install a sane fallback gradient
+            # (Classic) so the waterfall isn't black-on-black during
+            # the very first frames after initializeGL but before the
+            # operator's palette has been applied.
+            try:
+                from lyra.ui.palettes import PALETTES
+                self._palette_data = PALETTES["Classic"].copy()
+                self._palette_dirty = True
+            except (ImportError, KeyError):
+                pass  # widget will still work, just black until set
+
         # Suppress drawing the textured quad until a row is pushed.
         self._row_pending = False
 
@@ -787,6 +862,24 @@ class WaterfallGpuWidget(QOpenGLWidget):
         gl = self._gl
         # Set viewport every frame — see _set_viewport docstring.
         self._set_viewport()
+
+        # ── Upload pending palette LUT (rare — only on switch) ────
+        # If set_palette() was called since the last paint, push the
+        # 256x3 RGB array to the palette texture. Cheap (768 bytes),
+        # but doing it here keeps GL access on the right thread.
+        if self._palette_dirty and self._palette_tex is not None \
+                and self._palette_data is not None:
+            self._palette_tex.bind(1)
+            gl.glTexSubImage2D(
+                GL_TEXTURE_2D, 0,
+                0, 0,                            # x, y in texture
+                256, 1,                          # width, height
+                0x1907,                          # GL_RGB
+                GL_UNSIGNED_BYTE,
+                self._palette_data.tobytes(),
+            )
+            self._palette_tex.release(1)
+            self._palette_dirty = False
 
         # ── Upload a pending row ──────────────────────────────────
         # We bind via QOpenGLTexture (which both binds AND activates
@@ -817,15 +910,20 @@ class WaterfallGpuWidget(QOpenGLWidget):
 
         # ── Draw the fullscreen quad ─────────────────────────────
         self._prog.bind()
-        # Bind the texture to unit 0. QOpenGLTexture.bind(0) handles
-        # glActiveTexture(GL_TEXTURE0) + glBindTexture for us.
+        # Bind both textures: waterfall data on unit 0, palette LUT
+        # on unit 1. QOpenGLTexture.bind(N) handles
+        # glActiveTexture(GL_TEXTUREN) + glBindTexture for us.
         self._tex.bind(0)
-        # Sampler uniform MUST be set with the int-specific overload —
-        # the generic setUniformValue routes Python int through the
+        if self._palette_tex is not None:
+            self._palette_tex.bind(1)
+        # Sampler uniforms MUST be set with the int-specific overload
+        # — the generic setUniformValue routes Python int through the
         # float overload, which leaves the sampler in an undefined
         # state and triggers GL_INVALID_OPERATION on draw.
         if self._loc_sampler >= 0:
             self._prog.setUniformValue1i(self._loc_sampler, 0)
+        if self._loc_palette >= 0:
+            self._prog.setUniformValue1i(self._loc_palette, 1)
         if self._loc_row_offset >= 0:
             self._prog.setUniformValue1f(
                 self._loc_row_offset, float(self._write_row))
@@ -848,6 +946,8 @@ class WaterfallGpuWidget(QOpenGLWidget):
         gl.glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
         self._vao.release()
         self._tex.release(0)
+        if self._palette_tex is not None:
+            self._palette_tex.release(1)
         self._prog.release()
 
     # ── Internal: synthetic data generator (Phase A test only) ─────
@@ -888,6 +988,9 @@ class WaterfallGpuWidget(QOpenGLWidget):
             self._tex.destroy()
             self._tex = None
             self._tex_id = 0
+        if self._palette_tex is not None:
+            self._palette_tex.destroy()
+            self._palette_tex = None
         if self._vbo is not None:
             self._vbo.destroy()
             self._vbo = None
