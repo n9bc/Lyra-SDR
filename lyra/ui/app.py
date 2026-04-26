@@ -1708,23 +1708,75 @@ class MainWindow(QMainWindow):
             self._perf_label.setText("")
 
     def _on_perf_stats(self, stats: dict):
-        """Render the perf snapshot into the status-bar label. Format
-        favors information density over prettiness — operators reading
-        this care about ms-per-frame and frame rate, not formatting.
+        """Render the perf snapshot into the status-bar label. Phase
+        1a.2 — shows per-stage breakdown so we can see WHERE time is
+        being spent in _tick_fft, not just the total. The on-screen
+        format is dense single-line for live readability; the tooltip
+        carries the same data in a tabular layout for screenshots.
 
-        Snapshot shape:
-            {"fft":  {"avg_ms": 2.3, "rate_hz": 30, ...},
-             "tick": {"avg_ms": 5.1, "rate_hz": 30, ...}}
+        Snapshot shape (Phase 1a.2):
+            {"ring":  {...}, "fft":   {...}, "db":    {...},
+             "smt":   {...}, "nf":    {...}, "scale": {...},
+             "emit":  {...}, "tick":  {...}}
+
+        Display:
+            ring 6.2 · fft 0.1 · db 1.4 · smt 0.1 · nf 0.4 · scale 0.0
+            · emit 1.9 ms · tick 10.2 · 13.0 Hz
+
+        That tells us at a glance whether the bottleneck is the FFT
+        (the GPU candidate), the deque iteration (a CPython trap
+        fixable without GPU), or the signal-emit / paint chain (which
+        no FFT optimization can help — needs an OpenGL panadapter).
         """
         try:
-            fft = stats.get("fft", {})
-            tick = stats.get("tick", {})
-            fft_ms = fft.get("avg_ms", 0.0)
-            tick_ms = tick.get("avg_ms", 0.0)
-            rate = tick.get("rate_hz", 0.0)
+            def _ms(key: str) -> float:
+                return stats.get(key, {}).get("avg_ms", 0.0)
+
+            ring  = _ms("ring")
+            fft   = _ms("fft")
+            db    = _ms("db")
+            smt   = _ms("smt")
+            nf    = _ms("nf")
+            scale = _ms("scale")
+            emit  = _ms("emit")
+            tick  = _ms("tick")
+            rate  = stats.get("tick", {}).get("rate_hz", 0.0)
+
+            # Inline format — keep stage names short so the line
+            # doesn't push the version label off-screen on narrow
+            # status bars.
             self._perf_label.setText(
-                f"FFT {fft_ms:5.2f} ms · tick {tick_ms:5.2f} ms · "
-                f"{rate:4.1f} Hz")
+                f"ring {ring:4.2f} · fft {fft:4.2f} · db {db:4.2f} · "
+                f"smt {smt:4.2f} · nf {nf:4.2f} · scale {scale:4.2f} · "
+                f"emit {emit:4.2f} ms · tick {tick:5.2f} · {rate:4.1f} Hz"
+            )
+
+            # Tooltip: tabular form so a screenshot can be pasted into
+            # a bug report and read easily. Includes max so transient
+            # spikes are visible (the live label only shows averages).
+            def _fmt(key: str, label: str) -> str:
+                d = stats.get(key, {})
+                avg = d.get("avg_ms", 0.0)
+                mn = d.get("min_ms", 0.0)
+                mx = d.get("max_ms", 0.0)
+                return (f"  {label:6s}  avg {avg:6.2f}   "
+                        f"min {mn:6.2f}   max {mx:6.2f}  ms")
+            tip_lines = [
+                "DSP performance breakdown (averages over last ~2 sec)",
+                "",
+                _fmt("ring",  "ring"),
+                _fmt("fft",   "fft"),
+                _fmt("db",    "db"),
+                _fmt("smt",   "smt"),
+                _fmt("nf",    "nf"),
+                _fmt("scale", "scale"),
+                _fmt("emit",  "emit"),
+                "  " + "─" * 50,
+                _fmt("tick",  "tick"),
+                "",
+                f"  rate    {rate:5.2f} Hz",
+            ]
+            self._perf_label.setToolTip("\n".join(tip_lines))
         except Exception:
             # Defensive — never let a status-bar update kill the UI.
             self._perf_label.setText("")
