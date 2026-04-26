@@ -48,6 +48,38 @@ GENERAL_PACKET_LEN = 60
 DDC_SPECIFIC_PACKET_LEN = 1444    # spec uses up to byte 1443 (currently not used)
 HIGH_PRIORITY_PACKET_LEN = 1444   # ditto — covers all defined fields + Alex slots
 DDC_IQ_FRAME_LEN_24BIT = 1444     # 16 header + 238*(3+3) sample bytes
+DUC_SPECIFIC_PACKET_LEN = 60      # spec: 60-byte fixed-size DUC config
+
+
+# ─── DDC/DUC frequency encoding (phase increment) ─────────────────────────────
+#
+# Apache firmware (verified against ANAN-G2 wire capture + pi-hpsdr source)
+# expects DDC and DUC frequencies as 32-bit phase-accumulator increments,
+# NOT raw Hz. The constant `(1 << 32) / 122_880_000` is the per-Hz phase
+# step at the 122.88 MHz radio sample clock — pi-hpsdr's
+# `new_protocol.c` uses this exact value (34.952533...).
+#
+# The radio also requires General-Packet byte 37 = 0x08 to actually
+# interpret these fields as phase increments. Without that flag the
+# FPGA falls back to a Hz interpretation and tunes nowhere useful.
+
+RADIO_SAMPLE_CLOCK_HZ = 122_880_000
+PHASE_PER_HZ = (1 << 32) / RADIO_SAMPLE_CLOCK_HZ   # ≈ 34.95253...
+
+
+def freq_hz_to_phase(freq_hz: int) -> int:
+    """Convert a tune frequency in Hz to the 32-bit phase increment."""
+    if not 0 <= freq_hz <= RADIO_SAMPLE_CLOCK_HZ:
+        raise ValueError(
+            f"freq_hz {freq_hz} outside [0, {RADIO_SAMPLE_CLOCK_HZ}] — "
+            f"phase increment would overflow u32"
+        )
+    return int(round(freq_hz * PHASE_PER_HZ)) & 0xFFFFFFFF
+
+
+def phase_to_freq_hz(phase: int) -> int:
+    """Inverse of `freq_hz_to_phase` — useful for decoding captures + loopback."""
+    return int(round(phase / PHASE_PER_HZ))
 
 
 # ─── valid DDC sample rates (ksps) ────────────────────────────────────────────
@@ -96,7 +128,7 @@ class GeneralPacketConfig:
     wideband_sample_size_bits: int = 16
     wideband_update_rate_ms: int = 20
     wideband_packets_per_frame: int = 32
-    enable_hardware_timer: bool = False
+    enable_hardware_timer: bool = True
     # Endian / data-format byte 39, default 0 = big-endian + 3-byte IQ.
     # Bit layouts per spec:
     #   bit 0 = 1 → little-endian wire format
@@ -105,6 +137,24 @@ class GeneralPacketConfig:
     #   bit 3 = 1 → use float
     #   bit 4 = 1 → use double
     endian_and_iq_format: int = 0x00
+    # Byte 37 = "freq-mode bits". Setting bit 3 (0x08) tells the radio
+    # that DDC/DUC frequencies in the High Priority packet are 32-bit
+    # phase increments rather than raw Hz. Apache firmware (incl. v4.3
+    # on ANAN-G2) requires this for any HF tune to work; pi-hpsdr always
+    # sets it. Default True — change only if you know your radio expects
+    # raw-Hz mode (none observed in the wild).
+    phase_mode: bool = True
+    # Byte 58 = PA/Apollo bits. Bit 0 (0x01) enables the on-board PA
+    # routing. ORION2 / SATURN need this set even for RX-only or the
+    # input chain stays disabled. Bit 1 (0x02) is the Apollo tuner —
+    # leave off unless you actually have an Apollo board.
+    pa_enable: bool = True
+    apollo_tuner: bool = False
+    # Byte 59 = Alex enable bits. 0x01 = Alex0 only (Hermes), 0x03 =
+    # Alex0 + Alex1 (ORION2 / SATURN — both filter banks active).
+    # Without 0x03 on a dual-Alex radio, RF goes through the wrong
+    # filter bank and audio is heavily attenuated.
+    alex_enable: int = 0x03
 
 
 def build_general_packet(seq: int, cfg: GeneralPacketConfig) -> bytes:
@@ -126,11 +176,15 @@ def build_general_packet(seq: int, cfg: GeneralPacketConfig) -> bytes:
     pkt[26] = cfg.wideband_sample_size_bits & 0xFF
     pkt[27] = cfg.wideband_update_rate_ms & 0xFF
     pkt[28] = cfg.wideband_packets_per_frame & 0xFF
-    # 29..36 memory mapped + envelope PWM — leave zero
-    # 37 = bitmask (timestamp / VITA / VNA / freq-or-phase) — leave zero
+    # 29..36 reserved (memory mapped / envelope PWM dot clock — leave zero;
+    # Thetis writes some bytes here but pi-hpsdr leaves them zero and
+    # ANAN-G2 streams happily either way).
+    pkt[37] = 0x08 if cfg.phase_mode else 0x00
     pkt[38] = 0x01 if cfg.enable_hardware_timer else 0x00
     pkt[39] = cfg.endian_and_iq_format & 0xFF
-    # 40..59 reserved
+    # 40..57 reserved (zero).
+    pkt[58] = (0x01 if cfg.pa_enable else 0x00) | (0x02 if cfg.apollo_tuner else 0x00)
+    pkt[59] = cfg.alex_enable & 0xFF
     return bytes(pkt)
 
 
@@ -211,7 +265,15 @@ class HighPriorityConfig:
     """Per-send state for the High Priority From PC packet.
 
     `run` must be True for the radio to stream; PTT bits remain False
-    in the v1 RX-only path.
+    in the v1 RX-only path. DDC and DUC frequencies are specified in
+    Hz; the builder converts to phase increments on the wire when
+    `phase_mode=True` (the default — required by Apache firmware).
+
+    Alex0 / Alex1 control words drive the BPF / LPF / antenna relays.
+    On ORION2 / SATURN both words must be set to non-zero "open the
+    receive path" values or the input is muted. The defaults here
+    mirror what Thetis sends for an idle ANAN-G2 on 20 m; future
+    revisions should derive these from the current frequency.
     """
     run: bool = False
     ptt: tuple[bool, bool, bool, bool] = (False, False, False, False)
@@ -222,6 +284,9 @@ class HighPriorityConfig:
     user_outputs_db9: int = 0                       # bits 0..3
     mercury_attenuator_20db: int = 0                # bits 0..3
     alex_attenuator_db: int = 0                     # 0..31
+    phase_mode: bool = True                         # Hz → phase on the wire
+    alex0_word: int = 0                             # bytes 1432..1435 BE
+    alex1_word: int = 0                             # bytes 1428..1431 BE
 
     def __post_init__(self) -> None:
         if self.ddc_freqs_hz is None:
@@ -231,14 +296,19 @@ class HighPriorityConfig:
 def build_high_priority_packet(seq: int, cfg: HighPriorityConfig) -> bytes:
     """Encode a High Priority From PC packet (1444 bytes, byte[4]=run/PTT bits).
 
-    DDC frequencies live at bytes 9 + ddc_idx*4 (32-bit BE, Hz).
-    DUC0 frequency lives at bytes 329..332.
-    DUC0 drive level at byte 345.
+    Field layout (post-Apache-G2 reverse engineering, matches pi-hpsdr's
+    `new_protocol_high_priority`):
+        bytes 9 + ddc_idx*4 .. +3   — DDC[ddc_idx] tune word, BE u32
+                                       (phase increment when phase_mode=True,
+                                       raw Hz otherwise)
+        bytes 329..332              — DUC0 tune word, BE u32 (same rule)
+        byte 345                    — DUC0 drive level
+        byte 1401..1403             — open collector / user-output bits
+        bytes 1428..1431            — Alex1 control word, BE
+        bytes 1432..1435            — Alex0 control word, BE
 
-    Bytes we don't explicitly set stay zero — the radio interprets that
-    as "no PTT, no Alex filter, no transverter, default everything." The
-    spec recommends sending this packet on every state change AND
-    periodically as a refresh; v1 P2Stream sends it once per second.
+    Spec recommends sending this on every state change AND periodically
+    as a refresh; v1 P2Stream sends it once per second.
     """
     pkt = bytearray(HIGH_PRIORITY_PACKET_LEN)
     struct.pack_into(">I", pkt, 0, seq & 0xFFFFFFFF)
@@ -255,19 +325,77 @@ def build_high_priority_packet(seq: int, cfg: HighPriorityConfig) -> bytes:
     for ddc_idx, freq_hz in cfg.ddc_freqs_hz.items():
         if not 0 <= ddc_idx < 80:
             raise ValueError(f"DDC index out of range: {ddc_idx}")
-        if not 0 <= freq_hz <= 0xFFFFFFFF:
-            raise ValueError(f"freq_hz out of u32 range: {freq_hz}")
-        struct.pack_into(">I", pkt, 9 + ddc_idx * 4, freq_hz)
+        wire_value = freq_hz_to_phase(freq_hz) if cfg.phase_mode else freq_hz
+        if not 0 <= wire_value <= 0xFFFFFFFF:
+            raise ValueError(f"DDC[{ddc_idx}] tune word overflow: {wire_value}")
+        struct.pack_into(">I", pkt, 9 + ddc_idx * 4, wire_value)
 
     if cfg.duc0_freq_hz:
-        struct.pack_into(">I", pkt, 329, cfg.duc0_freq_hz & 0xFFFFFFFF)
+        duc_wire = (
+            freq_hz_to_phase(cfg.duc0_freq_hz) if cfg.phase_mode else cfg.duc0_freq_hz
+        )
+        struct.pack_into(">I", pkt, 329, duc_wire & 0xFFFFFFFF)
     pkt[345] = cfg.duc0_drive_level & 0xFF
 
     # OC + user-output + Mercury attenuator bytes (1401..1403).
     pkt[1401] = cfg.open_collector_outputs & 0xFF
     pkt[1402] = cfg.user_outputs_db9 & 0xFF
     pkt[1403] = cfg.mercury_attenuator_20db & 0xFF
-    # Alex slots (1404+) stay zero — we don't drive Alex filters in v1.
+
+    # Alex relay control words (BE u32 each). pi-hpsdr layout:
+    #   1428..1431 = Alex1, 1432..1435 = Alex0.
+    if cfg.alex1_word:
+        struct.pack_into(">I", pkt, 1428, cfg.alex1_word & 0xFFFFFFFF)
+    if cfg.alex0_word:
+        struct.pack_into(">I", pkt, 1432, cfg.alex0_word & 0xFFFFFFFF)
+
+    return bytes(pkt)
+
+
+# ─── DUC Specific Packet (host → radio:1026) ─────────────────────────────────
+#
+# pi-hpsdr sends this packet unconditionally at startup (no `if (tx)` guard).
+# The Apache FPGA expects a DUC config to come up before it fully arms the
+# streaming engine, so RX-only callers should still emit one with the
+# safe defaults below. Layout matches `new_protocol_transmit_specific`.
+
+@dataclass
+class DucConfig:
+    """Per-send state for the DUC Specific (60-byte) packet.
+
+    Defaults are pi-hpsdr's "RX-only safe" values: 1 DAC, no CW,
+    sidetone muted, keyer at 18 wpm / 50% weight / 316 ms hang.
+    """
+    n_dacs: int = 1
+    cw_mode_flags: int = 0x00
+    sidetone_volume: int = 0          # 0..127
+    sidetone_freq_hz: int = 700
+    keyer_speed_wpm: int = 18
+    keyer_weight: int = 50            # percent
+    keyer_hang_ms: int = 316
+    rf_delay: int = 9
+    keyer_ramp_width: int = 0xC0
+    adc0_attenuation_db: int = 0
+    adc1_attenuation_db: int = 0
+
+
+def build_duc_specific_packet(seq: int, cfg: Optional[DucConfig] = None) -> bytes:
+    """Encode the 60-byte DUC Specific packet (host → radio:1026)."""
+    if cfg is None:
+        cfg = DucConfig()
+    pkt = bytearray(DUC_SPECIFIC_PACKET_LEN)
+    struct.pack_into(">I", pkt, 0, seq & 0xFFFFFFFF)
+    pkt[4]  = cfg.n_dacs & 0xFF
+    pkt[5]  = cfg.cw_mode_flags & 0xFF
+    pkt[6]  = cfg.sidetone_volume & 0x7F
+    struct.pack_into(">H", pkt, 7, cfg.sidetone_freq_hz & 0xFFFF)
+    pkt[9]  = cfg.keyer_speed_wpm & 0xFF
+    pkt[10] = cfg.keyer_weight & 0xFF
+    struct.pack_into(">H", pkt, 11, cfg.keyer_hang_ms & 0xFFFF)
+    pkt[13] = cfg.rf_delay & 0xFF
+    pkt[17] = cfg.keyer_ramp_width & 0xFF
+    pkt[58] = cfg.adc1_attenuation_db & 0xFF
+    pkt[59] = cfg.adc0_attenuation_db & 0xFF
     return bytes(pkt)
 
 
@@ -333,3 +461,26 @@ def parse_ddc_iq_frame(data: bytes) -> Optional[IqFrame]:
         samples_per_frame=samples_per_frame,
         samples=samples.astype(np.complex64),
     )
+
+
+def parse_ddc_iq_frames(data: bytes, frame_size: int = DDC_IQ_FRAME_LEN_24BIT):
+    """Yield each native IQ frame inside a (possibly NIC-coalesced) recv buffer.
+
+    Windows' Receive Segment Coalescing and Linux UDP-GRO will sometimes
+    deliver 2, 3, or 4 native 1444-byte IQ frames stacked back-to-back
+    in a single ``recvfrom()`` return. Calling ``parse_ddc_iq_frame`` on
+    the raw buffer would only decode the first frame and silently drop
+    the rest — verified against the captured ANAN-G2 wire data, which
+    showed 5776-byte recvs (= 4 × 1444).
+
+    This walker slices the buffer at ``frame_size`` boundaries and
+    yields one ``IqFrame`` per chunk. Trailing bytes that don't make
+    up a full frame are discarded; that mirrors what ``parse_ddc_iq_frame``
+    would have done anyway.
+    """
+    if frame_size <= 0:
+        return
+    for offset in range(0, len(data) - frame_size + 1, frame_size):
+        frame = parse_ddc_iq_frame(data[offset:offset + frame_size])
+        if frame is not None:
+            yield frame
