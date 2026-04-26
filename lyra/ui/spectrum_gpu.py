@@ -175,7 +175,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # without burning CPU on a passive demo.
     _SYNTHETIC_HZ = 30
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, synthetic: bool = False):
+        """Construct the GPU spectrum widget.
+
+        synthetic: if True, the widget runs an internal sine-wave
+            generator at ~30 Hz until set_spectrum() is first called.
+            Useful for the standalone demo runner and for ad-hoc
+            "is this widget working" tests. **Defaults to FALSE** —
+            production integration (Lyra's SpectrumPanel) creates
+            the widget without synthetic mode, so the trace stays
+            blank until Radio.spectrum_ready starts feeding data.
+            Without this default, synthetic frames would be visible
+            briefly at startup before the first real frame arrives.
+        """
         super().__init__(parent)
         # Per-widget format (vs setting the global default) keeps the
         # GL context choice local to this widget tree.
@@ -210,18 +222,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
 
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
-        # over). Until then, paintGL regenerates the test sine wave
-        # each frame so motion is visible.
-        self._synthetic_active = True
+        # over). Default False — see constructor docstring.
+        self._synthetic_active = bool(synthetic)
         self._t0 = time.monotonic()
 
         # Drives synthetic-mode animation. Real data path doesn't
         # need this — set_spectrum's caller (Radio in Phase B) will
-        # request repaints via update() at FFT rate.
+        # request repaints via update() at FFT rate. Only started
+        # when synthetic mode is on.
         self._synth_timer = QTimer(self)
         self._synth_timer.setInterval(int(1000 / self._SYNTHETIC_HZ))
         self._synth_timer.timeout.connect(self.update)
-        self._synth_timer.start()
+        if self._synthetic_active:
+            self._synth_timer.start()
 
     # ── Public data API ────────────────────────────────────────────
 
@@ -526,7 +539,20 @@ class WaterfallGpuWidget(QOpenGLWidget):
     # How often to repaint while in synthetic-data mode.
     _SYNTHETIC_HZ = 30
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, synthetic: bool = False):
+        """Construct the GPU waterfall widget.
+
+        synthetic: if True, the widget runs an internal data
+            generator (moving gaussian bump on a noise floor) at
+            ~30 Hz until push_row() is first called. Useful for
+            standalone demos and ad-hoc widget tests. **Defaults
+            to FALSE** — production integration creates the widget
+            without synthetic mode so the texture stays empty until
+            Radio.waterfall_ready starts feeding real rows. Without
+            this default, synthetic rows would be visible briefly
+            at startup before the first real frame, leaving stale
+            test patterns in the circular buffer.
+        """
         super().__init__(parent)
         self.setFormat(lyra_gl_format())
 
@@ -574,12 +600,14 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._last_row_n: int = 0
 
         # Synthetic mode for self-test without a spectrum source.
-        self._synthetic_active = True
+        # Default False — see constructor docstring.
+        self._synthetic_active = bool(synthetic)
         self._t0 = time.monotonic()
         self._synth_timer = QTimer(self)
         self._synth_timer.setInterval(int(1000 / self._SYNTHETIC_HZ))
         self._synth_timer.timeout.connect(self._synthetic_tick)
-        self._synth_timer.start()
+        if self._synthetic_active:
+            self._synth_timer.start()
 
     # ── Public data API ────────────────────────────────────────────
 
