@@ -1444,6 +1444,15 @@ class WaterfallWidget(_PaintedWidget):
 
     def paintEvent(self, _event):
         p = QPainter(self)
+        # Smooth pixmap transform — without this, drawImage scales the
+        # waterfall bitmap with nearest-neighbor sampling (pixelated /
+        # chunky look when the widget is wider than the FFT bin count,
+        # which is essentially always at zoom > 1×). Bilinear gives a
+        # clean continuous appearance. Antialiasing helps the notch
+        # rectangles + VFO marker line blend cleanly against the
+        # waterfall colors.
+        p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        p.setRenderHint(QPainter.Antialiasing, True)
         p.fillRect(self.rect(), BG)
         if self._data is None:
             # Show a placeholder so the operator knows the widget is
