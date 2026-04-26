@@ -104,7 +104,7 @@ QToolTip {{
     /* opacity is set as a separate Qt property attr in code if we
        ever want translucent tooltips; default is fully opaque. */
 }}
-QLineEdit, QComboBox, QDoubleSpinBox {{
+QLineEdit, QComboBox {{
     background: {qss_color(BG_CTRL)};
     color: {qss_color(TEXT_PRIMARY)};
     border: 1px solid {qss_color(BORDER)};
@@ -112,9 +112,17 @@ QLineEdit, QComboBox, QDoubleSpinBox {{
     padding: 4px 6px;
     selection-background-color: {qss_color(ACCENT, 80)};
 }}
-QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {{
+QLineEdit:focus, QComboBox:focus {{
     border-color: {qss_color(ACCENT)};
 }}
+/* QDoubleSpinBox styling intentionally lives in the
+   QAbstractSpinBox block below — that block covers BOTH
+   QSpinBox and QDoubleSpinBox via the common base class. The
+   earlier QLineEdit rule was reserving only 6 px of right-side
+   padding which clobbered the up/down spin buttons (the up
+   button's hit region landed under the border + clipped by the
+   too-tight padding). The QAbstractSpinBox padding reserves 20 px
+   for the buttons so up/down both work cleanly. */
 QPushButton {{
     background: qlineargradient(x1:0,y1:0,x2:0,y2:1,
         stop:0 {qss_color(BG_CTRL)}, stop:1 {qss_color(BG_RECESS)});
@@ -369,7 +377,7 @@ QRadioButton:disabled {{
     color: {qss_color(TEXT_FAINT)};
 }}
 
-QSpinBox {{
+QAbstractSpinBox {{
     background: {qss_color(BG_CTRL)};
     color: {qss_color(TEXT_PRIMARY)};
     border: 1px solid {qss_color(BORDER)};
@@ -379,52 +387,52 @@ QSpinBox {{
        button hit region can land under the border. */
     padding: 3px 20px 3px 4px;
 }}
-QSpinBox:focus {{ border-color: {qss_color(ACCENT)}; }}
-QSpinBox::up-button, QSpinBox::down-button {{
+QAbstractSpinBox:focus {{ border-color: {qss_color(ACCENT)}; }}
+QAbstractSpinBox::up-button, QAbstractSpinBox::down-button {{
     subcontrol-origin: border;
     width: 16px;
     background: {qss_color(BG_CTRL)};
     border-left: 1px solid {qss_color(BORDER)};
 }}
-QSpinBox::up-button {{
+QAbstractSpinBox::up-button {{
     subcontrol-position: top right;
     border-bottom: 1px solid {qss_color(BORDER)};
     border-top-right-radius: 2px;
 }}
-QSpinBox::down-button {{
+QAbstractSpinBox::down-button {{
     subcontrol-position: bottom right;
     border-bottom-right-radius: 2px;
 }}
-QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+QAbstractSpinBox::up-button:hover, QAbstractSpinBox::down-button:hover {{
     background: {qss_color(ACCENT_DIM)};
 }}
-QSpinBox::up-button:pressed, QSpinBox::down-button:pressed {{
+QAbstractSpinBox::up-button:pressed, QAbstractSpinBox::down-button:pressed {{
     background: {qss_color(BG_RECESS)};
 }}
 /* CSS-triangle arrows — no image assets needed. Width=0 + two
    transparent borders + one colored border = triangle. */
-QSpinBox::up-arrow {{
+QAbstractSpinBox::up-arrow {{
     width: 0px; height: 0px;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
     border-bottom: 5px solid {qss_color(TEXT_PRIMARY)};
 }}
-QSpinBox::up-arrow:hover {{
+QAbstractSpinBox::up-arrow:hover {{
     border-bottom-color: {qss_color(ACCENT)};
 }}
-QSpinBox::down-arrow {{
+QAbstractSpinBox::down-arrow {{
     width: 0px; height: 0px;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
     border-top: 5px solid {qss_color(TEXT_PRIMARY)};
 }}
-QSpinBox::down-arrow:hover {{
+QAbstractSpinBox::down-arrow:hover {{
     border-top-color: {qss_color(ACCENT)};
 }}
-QSpinBox::up-arrow:disabled, QSpinBox::up-arrow:off {{
+QAbstractSpinBox::up-arrow:disabled, QAbstractSpinBox::up-arrow:off {{
     border-bottom-color: {qss_color(TEXT_FAINT)};
 }}
-QSpinBox::down-arrow:disabled, QSpinBox::down-arrow:off {{
+QAbstractSpinBox::down-arrow:disabled, QAbstractSpinBox::down-arrow:off {{
     border-top-color: {qss_color(TEXT_FAINT)};
 }}
 
