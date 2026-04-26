@@ -46,6 +46,9 @@ up changes.
 - **Audio Routing** — HL2 vs HL2+ paths, AK4951, sounddevice
 - **Keyboard Shortcuts** — all the hotkeys
 - **Troubleshooting** — common issues and their fixes
+
+*(At the end of the topic list)*
+
 - **Support Lyra** — donate, file bugs, contribute
 - **License** — MIT (full text + third-party attributions)
 

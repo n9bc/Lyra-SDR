@@ -84,6 +84,12 @@ class HelpDialog(QDialog):
         "tci",
         "shortcuts",
         "troubleshooting",
+        # Support + License pinned at the END — they're not
+        # operating-reference material; pinning them last keeps the
+        # workflow-relevant topics at the top of the list where
+        # operators expect them.
+        "support",
+        "license",
     ]
 
     # Emitted when user picks a topic (mostly useful for tests).
