@@ -337,25 +337,78 @@ screen keep their existing colors until they scroll off.
 | **Night**     | Black → deep red → orange. Preserves dark-adapted vision for late DX. |
 | **Grayscale** | Black → white. Useful for screenshots / printing. |
 
-## Graphics backend — Software / OpenGL
+## Graphics backend — Software / OpenGL / GPU panadapter
 
-**Settings → Visuals → Graphics backend** picks whether painted
-widgets rasterize on the CPU (Software, default) or the GPU
-(OpenGL). Same `QPainter` code either way — OpenGL just moves the
-rasterization off the main Python thread, which keeps audio smooth
-during window resize / fullscreen toggle.
+**Settings → Visuals → Graphics backend** picks how the trace +
+waterfall get drawn. Four options, in order of how much of the
+work the GPU does:
 
-- **Software (QPainter)** — always works, default. Every Windows GPU
-  from the last 20 years runs it fine.
-- **OpenGL** — recommended on any modern machine (really anything
-  Intel HD 4000 / 2012 and newer). Needs a restart after selection.
-- **Vulkan** — listed but greyed out; `QVulkanWindow` needs a full
-  shader rewrite, not on the near-term roadmap.
+- **Software (QPainter on CPU)** — always works, no GPU involved.
+  Every Windows machine from the last 20 years runs it. The safe
+  fallback if anything else gives you trouble.
+- **OpenGL — accelerated QPainter** — same QPainter code, but with
+  a `QOpenGLWidget` base so rasterization happens on the GPU.
+  Smoother resize / fullscreen, reduces audio stutter on weaker
+  CPUs. **Recommended for most operators.** Restart required.
+- **GPU panadapter (beta — opt-in)** — *new in v0.0.5+.* Custom
+  OpenGL pipeline written from scratch: vertex-buffer trace + texture-
+  streaming waterfall via custom GLSL shaders against an OpenGL 4.3
+  core context. Fastest path; the panadapter feels noticeably
+  smoother than the QPainter widgets even on already-fast hardware.
+  See **GPU panadapter (beta)** below for what's working and what
+  isn't yet.
+- **Vulkan (future, not implemented)** — placeholder. We may revisit
+  if PySide6's QRhi bindings mature enough to make a Vulkan path
+  worth the work, or if a real performance need surfaces that
+  OpenGL can't satisfy. Today, neither is true.
 
-If OpenGL fails to initialize for any reason (bad driver, remote
-session, headless CI), Lyra silently falls back to Software. The
-Visuals tab shows which backend is actually live alongside the one
-you selected.
+If your selected backend fails to initialize for any reason (bad
+driver, remote session, headless CI, broken shader), Lyra silently
+falls back to Software. The Visuals tab shows which backend is
+actually live alongside the one you selected.
+
+### GPU panadapter (beta)
+
+The new GPU panadapter renders the trace as a single GPU draw call
+(one `glDrawArrays` instead of one `drawLine` per pixel column) and
+streams the waterfall into a 2D texture so each new row is a
+single `glTexSubImage2D` upload, no buffer scrolling. The result:
+the panadapter feels smoother than even the OpenGL-accelerated
+QPainter version on the same hardware.
+
+**What works today** (BETA):
+
+- Trace + waterfall render correctly with full color palette
+- All Settings → Visuals controls that affect data (dB ranges,
+  trace color, palette) work live
+- Operator can switch backends with a Settings restart, no other
+  setup needed
+
+**What's missing in v0.0.5 BETA** (each lands in successive releases):
+
+- VFO marker (vertical line at tuned frequency)
+- Click-to-tune on the trace and waterfall
+- Right-click context menu (notch quick-add)
+- Wheel-to-zoom on empty spectrum
+- Y-axis drag to set the spectrum dB range
+- Passband overlay (cyan rectangle showing RX filter window)
+- RX-BW resize via dragging the passband edges
+- Notch markers + drag-to-resize-width + right-click menu
+- Spot markers (callsign boxes)
+- Band-plan strip (CW/DIG/SSB segments + landmark triangles)
+- Peak-hold markers
+- Noise-floor reference line
+
+If any of these features matter to your daily operation, **stay on
+"OpenGL — accelerated QPainter"** until the BETA reaches feature
+parity. The QPainter widget will remain available indefinitely as
+the safety-net fallback even after the GPU widget becomes the
+recommended default.
+
+**System requirements:** the GPU panadapter needs an OpenGL 4.3
+core profile context. That covers every NVIDIA / AMD / Intel GPU
+made since approximately 2013 — essentially any machine running a
+current Windows 10 or 11 install with up-to-date drivers.
 
 ## Update rates and zoom
 
