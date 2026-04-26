@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import socket
 import struct
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from lyra.protocol.netifaces import local_ipv4_addresses
 from lyra.protocol.p2.boards import lookup_board
 
 DISCOVERY_PORT = 1024
@@ -149,6 +151,87 @@ def _parse_reply(data: bytes, sender_ip: str) -> Optional[P2RadioInfo]:
     return info
 
 
+def _discover_on(
+    local_bind: str,
+    target_ip: Optional[str],
+    timeout_s: float,
+    attempts: int,
+) -> List[P2RadioInfo]:
+    """Run P2 discovery from a single bound interface. Internal helper."""
+    found: dict[str, P2RadioInfo] = {}
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.bind((local_bind, 0))
+    except OSError:
+        sock.close()
+        return []
+    sock.settimeout(0.1)
+
+    packet = _build_discovery_packet()
+    destination = target_ip if target_ip else "255.255.255.255"
+
+    try:
+        for _ in range(attempts):
+            try:
+                sock.sendto(packet, (destination, DISCOVERY_PORT))
+            except OSError:
+                # Some NIC + OS combos refuse broadcast on a particular
+                # bind IP (e.g. 169.254 link-local). Skip — the rest of
+                # the fan-out still covers the radio.
+                break
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                try:
+                    data, addr = sock.recvfrom(2048)
+                except socket.timeout:
+                    continue
+                except ConnectionResetError:
+                    # Windows surfaces ICMP "port unreachable" from a
+                    # previous send as ECONNRESET on the next recvfrom.
+                    # Bail out of the recv loop and try the next attempt.
+                    break
+                info = _parse_reply(data, addr[0])
+                if info and info.mac not in found:
+                    found[info.mac] = info
+    finally:
+        sock.close()
+
+    return list(found.values())
+
+
+def _discover_all_interfaces(
+    timeout_s: float,
+    attempts: int,
+) -> List[P2RadioInfo]:
+    """Broadcast in parallel from every local IPv4 NIC, merge by MAC."""
+    addrs = local_ipv4_addresses()
+    if len(addrs) == 1:
+        return _discover_on(addrs[0], None, timeout_s, attempts)
+
+    per_iface: list[List[P2RadioInfo]] = [[] for _ in addrs]
+    threads: list[threading.Thread] = []
+
+    def runner(idx: int, ip: str) -> None:
+        per_iface[idx] = _discover_on(ip, None, timeout_s, attempts)
+
+    for i, ip in enumerate(addrs):
+        t = threading.Thread(target=runner, args=(i, ip), daemon=True)
+        threads.append(t)
+        t.start()
+    for t in threads:
+        t.join(timeout=timeout_s * (attempts + 1))
+
+    by_mac: dict[str, P2RadioInfo] = {}
+    for batch in per_iface:
+        for info in batch:
+            if info.mac not in by_mac:
+                by_mac[info.mac] = info
+    return list(by_mac.values())
+
+
 def discover(
     timeout_s: float = 1.5,
     attempts: int = 2,
@@ -157,47 +240,30 @@ def discover(
 ) -> List[P2RadioInfo]:
     """Send a P2 discovery and collect replies.
 
+    With default arguments, fans out across **every local IPv4 NIC**
+    in parallel — important on multi-NIC hosts where the OS would
+    otherwise route a 255.255.255.255 broadcast out only one interface.
+    Pass an explicit ``local_bind`` (other than ``"0.0.0.0"``) or a
+    ``target_ip`` to keep the older single-socket behavior.
+
     Args:
         timeout_s: total wall time to wait for replies per attempt.
         attempts: how many times to resend the discovery packet (helps
             recover from a single dropped UDP packet on noisy networks).
-        local_bind: local IP to bind the sending socket to. 0.0.0.0
-            covers all NICs.
-        target_ip: if provided, unicast to this IP instead of broadcasting
-            255.255.255.255. Useful when the radio has a fixed IP and
-            broadcast is suppressed by the network.
+        local_bind: local IP to bind the sending socket to. ``"0.0.0.0"``
+            (default) + no ``target_ip`` triggers the multi-NIC fan-out;
+            any other value binds a single socket to that interface.
+        target_ip: if provided, unicast to this IP instead of
+            broadcasting 255.255.255.255. Useful when the radio has a
+            fixed IP and broadcast is suppressed by the network. Always
+            uses a single socket regardless of ``local_bind``.
 
     Returns:
-        One P2RadioInfo per unique MAC that replied. Order is the order
-        they replied (Python dict preserves insertion order).
+        One P2RadioInfo per unique MAC that replied.
     """
-    found: dict[str, P2RadioInfo] = {}
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind((local_bind, 0))
-    sock.settimeout(0.1)
-
-    packet = _build_discovery_packet()
-    destination = target_ip if target_ip else "255.255.255.255"
-
-    try:
-        for _ in range(attempts):
-            sock.sendto(packet, (destination, DISCOVERY_PORT))
-            deadline = time.monotonic() + timeout_s
-            while time.monotonic() < deadline:
-                try:
-                    data, addr = sock.recvfrom(2048)
-                except socket.timeout:
-                    continue
-                info = _parse_reply(data, addr[0])
-                if info and info.mac not in found:
-                    found[info.mac] = info
-    finally:
-        sock.close()
-
-    return list(found.values())
+    if local_bind == "0.0.0.0" and target_ip is None:
+        return _discover_all_interfaces(timeout_s, attempts)
+    return _discover_on(local_bind, target_ip, timeout_s, attempts)
 
 
 if __name__ == "__main__":
