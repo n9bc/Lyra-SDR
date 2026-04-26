@@ -457,6 +457,11 @@ class Radio(QObject):
         self._usb_bcd_value = 0
         self._bcd_60m_as_40m = True   # most amps share 40m filter for 60m
 
+        # board_id from discovery — forwarded to P2Stream so it can select
+        # the correct DDC slot (DDC2 for ORION2, DDC0 for Hermes-class).
+        # None = not yet discovered / manual IP entry.
+        self._board_id: Optional[int] = None
+
         # ── Runtime ───────────────────────────────────────────────────
         # Either HL2Stream (P1) or P2Stream (Apache P2). Both expose
         # set_sample_rate / set_lna_gain_db / stop / .stats with compatible
@@ -2850,7 +2855,11 @@ class Radio(QObject):
             return
         try:
             if self._protocol == "P2":
-                self._stream = P2Stream(self._ip, sample_rate=self._rate)
+                self._stream = P2Stream(
+                    self._ip,
+                    sample_rate=self._rate,
+                    board_id=self._board_id,
+                )
             else:
                 self._stream = HL2Stream(self._ip, sample_rate=self._rate)
             self._stream.start(
@@ -2930,6 +2939,7 @@ class Radio(QObject):
             return
         r = radios[0]
         self._protocol = r.protocol
+        self._board_id = r.board_id
         self.set_ip(r.ip)
         # Code-version line differs between protocols: P1 has a beta byte,
         # P2 reports a single firmware byte plus the protocol revision.
