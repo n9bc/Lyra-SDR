@@ -1,6 +1,6 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.3 — "First Tester Build"** *(2026-04-25)*
+**Current version: 0.0.4 — "Discovery & Scale Polish"** *(2026-04-26)*
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
@@ -25,7 +25,31 @@ The version string above is the single source of truth maintained in
 Bumping the version is a one-line edit in `lyra/__init__.py`; every
 display surface follows automatically.
 
-## What's in 0.0.3 — "First Tester Build"
+## What's in 0.0.4 — "Discovery & Scale Polish"
+
+A focused follow-up to the first tester build. Bug fixes and behavior
+refinements driven by real tester feedback:
+
+- **Auto-scale = clamp, not disable** — dragging the dB-range scale
+  on the spectrum no longer turns auto-scale OFF. Manual range becomes
+  the BOUNDS that auto-scale stays inside.
+- **Per-band scale memory** — each band remembers its own scale
+  bounds, with sensible factory defaults (160 m bottom-heavy, 6 m
+  top-heavy) so band-swapping just works.
+- **Multi-NIC discovery fix** — auto-discover now broadcasts on every
+  local network interface in parallel. Fixes the "tester with Wi-Fi +
+  Ethernet couldn't find the HL2" failure mode.
+- **Help → Network Discovery Probe** — new operator-facing diagnostic
+  dialog. Lists local interfaces, runs broadcast/unicast probes, full
+  debug log + copy-to-clipboard for bug reports.
+- **OpenGL upgrade nag actually appears** — the suggestion popup that
+  was supposed to nudge testers toward OpenGL was getting hidden
+  behind the main window on slow boots. Fixed.
+
+See `docs/help/troubleshooting.md` for an updated discovery troubleshooting
+flow, and `docs/help/spectrum.md` for the new auto-scale behavior.
+
+## What was in 0.0.3 — "First Tester Build"
 
 The first packaged installer release. Notable additions since 0.0.2:
 
