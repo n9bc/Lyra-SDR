@@ -116,6 +116,7 @@ GL_LINEAR                = 0x2601
 GL_NEAREST               = 0x2600
 GL_CLAMP_TO_EDGE         = 0x812F
 GL_UNPACK_ALIGNMENT      = 0x0CF5
+GL_VIEWPORT              = 0x0BA2
 
 # Where the GLSL source files live, relative to this module.
 _SHADER_DIR = Path(__file__).resolve().parent / "spectrum_gpu_shaders"
@@ -355,13 +356,24 @@ class SpectrumGpuWidget(QOpenGLWidget):
     def resizeGL(self, w: int, h: int) -> None:
         """Called by Qt when the widget is resized.
 
-        QOpenGLWidget already updates the GL viewport for us before
-        this is invoked. We only need to override if we maintain
-        view/projection matrices that depend on aspect ratio. Phase
-        A trace path uses NDC throughout, so this is a hook for
-        Phase B (overlays / axis labels).
+        High-DPI gotcha: on Windows display scaling > 100% (which is
+        the default on most modern laptops + many desktops), the
+        QOpenGLWidget framebuffer is sized in PHYSICAL pixels, not
+        the LOGICAL (w, h) values Qt passes here. Qt is supposed to
+        set glViewport for us, but in PySide6 6.11 it sometimes
+        leaves the viewport at the logical-pixel size — leaving the
+        bottom-right portion of the framebuffer (and therefore the
+        on-screen widget) un-rendered and showing background black.
+        We set the viewport ourselves using devicePixelRatio so the
+        quad and the trace fill the entire visible widget regardless
+        of OS scaling.
         """
-        pass
+        if self._gl is None:
+            return
+        dpr = self.devicePixelRatioF()
+        fb_w = max(1, int(round(w * dpr)))
+        fb_h = max(1, int(round(h * dpr)))
+        self._gl.glViewport(0, 0, fb_w, fb_h)
 
     def paintGL(self) -> None:
         """Called by Qt per frame to draw.
@@ -677,7 +689,18 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._row_pending = False
 
     def resizeGL(self, w: int, h: int) -> None:
-        pass
+        # Same high-DPI viewport handling as SpectrumGpuWidget — see
+        # that class's resizeGL docstring for the full explanation.
+        # Short version: PySide6 6.11 sometimes leaves the viewport
+        # at logical-pixel size after a resize on display-scaling-
+        # enabled systems, leading to the bottom-right of the
+        # framebuffer (= visible widget area) staying un-rendered.
+        if self._gl is None:
+            return
+        dpr = self.devicePixelRatioF()
+        fb_w = max(1, int(round(w * dpr)))
+        fb_h = max(1, int(round(h * dpr)))
+        self._gl.glViewport(0, 0, fb_w, fb_h)
 
     def paintGL(self) -> None:
         if self._gl is None or self._prog is None or self._tex is None:
