@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+from lyra.protocol.netifaces import local_ipv4_addresses
+
 DISCOVERY_PORT = 1024
 DISCOVERY_PACKET_LEN = 63
 BOARD_HERMES_LITE = 6
@@ -98,50 +100,6 @@ def _parse_reply(data: bytes, sender_ip: str) -> Optional[RadioInfo]:
     return info
 
 
-def list_local_ipv4_addresses() -> List[str]:
-    """Return every IPv4 address bound to a local network interface
-    on this machine, EXCLUDING loopback (127.x.x.x) and link-local
-    (169.254.x.x) ranges. Used by `discover()` to walk every NIC
-    when a target_ip isn't specified.
-
-    Without this, multi-homed hosts (laptop with Wi-Fi + Ethernet,
-    desktop with two NICs) silently lose discovery because
-    `socket.bind('0.0.0.0')` lets the OS pick exactly one
-    interface for the broadcast — usually the highest-priority
-    route, which may not be the one the HL2 is wired to.
-    """
-    addrs: list[str] = []
-    try:
-        # Best-effort: ask the OS for all addresses associated with
-        # this hostname. Works on Windows / Linux / macOS.
-        infos = socket.getaddrinfo(
-            socket.gethostname(), None, socket.AF_INET)
-        for info in infos:
-            ip = info[4][0]
-            if ip.startswith("127.") or ip.startswith("169.254."):
-                continue
-            if ip not in addrs:
-                addrs.append(ip)
-    except socket.gaierror:
-        pass
-    # Belt-and-suspenders: on some Windows configurations
-    # gethostname() returns only the primary IP. Try the
-    # connect-to-public-IP trick to flush out other adapters.
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.settimeout(0.1)
-            # Doesn't actually send a packet — just consults the
-            # routing table to find the source IP it WOULD use to
-            # reach 8.8.8.8 (Google DNS).
-            s.connect(("8.8.8.8", 1))
-            primary = s.getsockname()[0]
-            if primary not in addrs:
-                addrs.insert(0, primary)
-    except OSError:
-        pass
-    return addrs
-
-
 def discover(
     timeout_s: float = 1.5,
     attempts: int = 2,
@@ -150,6 +108,12 @@ def discover(
     debug_log: Optional[list] = None,
 ) -> List[RadioInfo]:
     """Broadcast a Protocol 1 discovery and collect replies.
+
+    With default arguments, fans out across **every local IPv4 NIC**
+    in parallel — important on multi-NIC hosts where the OS would
+    otherwise route a 255.255.255.255 broadcast out only one interface.
+    Pass an explicit ``local_bind`` (other than ``"0.0.0.0"``) or a
+    ``target_ip`` to keep the older single-socket behavior.
 
     Args:
         timeout_s: total wall time to wait for replies per attempt.
@@ -174,18 +138,17 @@ def discover(
     # Decide which interfaces to broadcast through.
     # Unicast (target_ip set): single socket bound to 0.0.0.0,
     # let the OS route normally to the target.
-    # Multi-NIC broadcast: enumerate all local IPv4 addrs, bind a
-    # socket to each one, broadcast through each. Catches HL2s
-    # that are on any interface — Wi-Fi, Ethernet, USB-Ethernet,
-    # whatever.
+    # Multi-NIC broadcast: enumerate all local IPv4 addrs (via the
+    # shared `lyra.protocol.netifaces` helper, which P2 discovery
+    # also uses), bind a socket to each one, broadcast through each.
     # Specific bind IP: just use that one (operator override).
     if target_ip:
         bind_ips = ["0.0.0.0"]
         _log(f"Mode: unicast to {target_ip}")
     elif local_bind == "0.0.0.0":
-        bind_ips = list_local_ipv4_addresses()
-        if not bind_ips:
-            bind_ips = ["0.0.0.0"]   # fallback if enumeration failed
+        bind_ips = local_ipv4_addresses()
+        # netifaces returns ["0.0.0.0"] as a fallback if enumeration
+        # yields nothing usable, so bind_ips is always non-empty.
         _log(f"Mode: broadcast on {len(bind_ips)} local interface(s):"
              f" {', '.join(bind_ips)}")
     else:
@@ -230,6 +193,12 @@ def discover(
                     try:
                         data, addr = s.recvfrom(2048)
                     except socket.timeout:
+                        continue
+                    except ConnectionResetError:
+                        # Windows surfaces ICMP "port unreachable" from
+                        # a previous send as ECONNRESET on recvfrom.
+                        # Means nobody answered on this socket; skip it
+                        # and keep polling the others.
                         continue
                     except OSError:
                         continue

@@ -36,10 +36,17 @@ Expected output (one line per radio):
 192.168.1.50    AA:BB:CC:DD:EE:FF  ANAN-G2  proto=v10.4  fw=50  ddcs=8  busy=False
 ```
 
-If discovery turns up empty:
+Discovery now broadcasts in parallel from every local IPv4 interface
+(WiFi + wired NIC + Hyper-V/WSL virtual switches), so a multi-NIC host
+should find the radio without any extra flags. If discovery still
+turns up empty:
+
 - Confirm the radio is reachable (`ping <radio-ip>`).
 - If broadcast is suppressed by your network/firewall, try unicast:
   `py -3.14 -m lyra.protocol.p2.discovery --target 192.168.1.50`.
+- Force a single specific NIC if multi-NIC fan-out somehow misbehaves:
+  `py -3.14 -m lyra.protocol.p2.discovery --bind 192.168.1.20`
+  (replace with the IP of the NIC the radio is on).
 - Allow Python through Windows Defender Firewall (UDP 1024 inbound).
 - Add `--raw` to see the full 60-byte reply if you want to verify the
   parse field-by-field.
