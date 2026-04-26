@@ -1037,7 +1037,7 @@ class VisualsSettingsTab(QWidget):
         # ── Graphics backend ──────────────────────────────────────
         from lyra.ui.gfx import (
             ACTIVE_BACKEND, BACKEND_LABELS, BACKEND_SOFTWARE,
-            BACKEND_OPENGL, BACKEND_VULKAN,
+            BACKEND_OPENGL, BACKEND_GPU_OPENGL, BACKEND_VULKAN,
         )
         grp_gfx = QGroupBox("Graphics backend")
         g = QGridLayout(grp_gfx)
@@ -1057,8 +1057,18 @@ class VisualsSettingsTab(QWidget):
             (BACKEND_OPENGL,
              "OpenGL — GPU-accelerated QPainter. Smoother resize / "
              "fullscreen, reduces audio stutter. Recommended."),
+            (BACKEND_GPU_OPENGL,
+             "GPU panadapter (BETA) — full custom OpenGL pipeline for "
+             "the trace + waterfall. Vertex-buffer trace + texture-"
+             "streaming waterfall via custom shaders. Fastest path. "
+             "Currently missing some QPainter overlays (notches, spots, "
+             "band plan, peak markers) — they'll be added in successive "
+             "releases. Default stays on the QPainter renderers until "
+             "this option has tester time across many GPU configurations."),
             (BACKEND_VULKAN,
-             "Vulkan — experimental, not yet implemented."),
+             "Vulkan — placeholder for a future custom-pipeline "
+             "renderer. Reserved if QRhi PySide6 bindings mature or a "
+             "real performance need surfaces. Not implemented today."),
         ):
             rb = QRadioButton(BACKEND_LABELS[key])
             rb.setToolTip(label)
