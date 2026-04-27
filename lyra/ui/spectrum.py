@@ -13,7 +13,7 @@ from PySide6.QtGui import (
 # to the GPU so resize/fullscreen doesn't stall the demod thread.
 from .gfx import ACCELERATED_BASE as _PaintedWidget
 
-BG = QColor(12, 20, 32)
+BG = QColor(0, 0, 0)         # panadapter background — pure black to match the waterfall
 GRID = QColor(40, 60, 80)
 AXIS = QColor(170, 204, 238)
 TRACE = QColor(94, 200, 255)

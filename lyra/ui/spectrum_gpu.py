@@ -84,7 +84,7 @@ from PySide6.QtOpenGLWidgets import QOpenGLWidget
 # Background color for the panadapter (RGB normalized 0..1) — matches
 # the QPainter widget's `BG = QColor(12, 20, 32)` so visuals stay
 # continuous when the operator switches renderers in Settings.
-_BG_R, _BG_G, _BG_B = 12 / 255.0, 20 / 255.0, 32 / 255.0
+_BG_R, _BG_G, _BG_B = 0.0, 0.0, 0.0    # black, matches the QPainter widget's BG and the waterfall
 
 # Default trace color — Lyra's TRACE QColor(94, 200, 255) normalized.
 _DEFAULT_TRACE = (94 / 255.0, 200 / 255.0, 255 / 255.0, 1.0)

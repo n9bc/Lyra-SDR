@@ -55,40 +55,41 @@ LYRA_LINES = [
 ]
 
 
-# Visual tuning constants. These are deliberately conservative — the
-# constellation should be visible but never drown out the spectrum.
-BASE_ALPHA          = 110   # max alpha (0..255) for the brightest pixel
-LINE_ALPHA_MULT     = 0.45  # lines dimmer than stars
-EDGE_FADE_INNER     = 0.20  # radial fraction inside which alpha = 0
-EDGE_FADE_OUTER     = 0.85  # radial fraction outside which alpha = full
-STAR_RADIUS_PX      = 2.0   # base star dot radius
-VEGA_RADIUS_PX      = 3.5   # Vega is bigger
+# Visual tuning constants. The constellation should be visible
+# everywhere, just dimmer in the central trace area than near the
+# corners. First-pass numbers were too aggressive (BASE_ALPHA=110 +
+# inner-fade-to-zero meant most stars were invisible on a wide
+# panadapter); these are tuned to be readable on a black background.
+BASE_ALPHA          = 180   # max alpha (0..255) for the brightest pixel
+LINE_ALPHA_MULT     = 0.50  # lines dimmer than stars
+EDGE_FADE_CENTER    = 0.40  # alpha multiplier at the widget center
+EDGE_FADE_CORNER    = 1.00  # alpha multiplier at the corners
+STAR_RADIUS_PX      = 2.5   # base star dot radius
+VEGA_RADIUS_PX      = 4.5   # Vega is the showpiece
 VEGA_PULSE_PERIOD_S = 3.5   # full sine cycle in seconds
-VEGA_PULSE_MIN      = 0.45  # alpha at the dim end of the pulse
+VEGA_PULSE_MIN      = 0.55  # alpha at the dim end of the pulse
 VEGA_PULSE_MAX      = 1.00  # alpha at the bright end
-STAR_COLOR          = QColor(180, 210, 255)    # cool blue-white
-VEGA_COLOR          = QColor(220, 235, 255)    # slightly bluer/brighter
-LINE_COLOR          = QColor(150, 180, 220)
+STAR_COLOR          = QColor(190, 215, 255)    # cool blue-white
+VEGA_COLOR          = QColor(230, 240, 255)    # slightly bluer/brighter
+LINE_COLOR          = QColor(160, 190, 225)
 
 
 def _edge_fade(nx: float, ny: float) -> float:
-    """Radial alpha multiplier — 0 at the widget center, 1 at corners.
+    """Radial alpha multiplier ∈ [EDGE_FADE_CENTER, EDGE_FADE_CORNER].
 
-    nx, ny are normalized to [0,1] across the widget. We measure
-    distance from (0.5, 0.5), normalize so the corner = 1.0, then
-    apply a soft inner cutoff and outer ramp so the falloff feels
-    smooth rather than abrupt."""
+    nx, ny are normalized to [0,1] across the widget. Stars near the
+    widget center are dimmer (less likely to fight the trace); stars
+    near the corners are at full alpha. Falloff is smooth (smoothstep)
+    rather than a sharp cutoff. Never returns 0 — the operator wants
+    the constellation visible everywhere, just attenuated centrally."""
     dx = nx - 0.5
     dy = ny - 0.5
     # Max possible radial distance in normalized space is sqrt(0.5) ~= 0.707.
-    r = math.hypot(dx, dy) / 0.707
-    if r <= EDGE_FADE_INNER:
-        return 0.0
-    if r >= EDGE_FADE_OUTER:
-        return 1.0
-    # Smoothstep between inner and outer.
-    t = (r - EDGE_FADE_INNER) / (EDGE_FADE_OUTER - EDGE_FADE_INNER)
-    return t * t * (3.0 - 2.0 * t)
+    r = math.hypot(dx, dy) / 0.707  # 0 at center, 1 at corners
+    # Smoothstep over [0, 1] for a soft sigmoid-ish curve.
+    t = max(0.0, min(1.0, r))
+    s = t * t * (3.0 - 2.0 * t)
+    return EDGE_FADE_CENTER + (EDGE_FADE_CORNER - EDGE_FADE_CENTER) * s
 
 
 def _vega_pulse_factor() -> float:
@@ -113,12 +114,13 @@ def draw(painter: QPainter, w: int, h: int) -> None:
         return
 
     # Pre-compute pixel positions + edge-fade for each star.
-    # We bias the constellation into the upper portion of the widget
-    # (panadapter is much wider than tall; full-height stretch makes
-    # the parallelogram look squashed). The constellation occupies
-    # the central horizontal band, scaled to a square cell sized to
-    # the widget's height.
-    cell = min(int(h * 0.85), int(w * 0.45))
+    # The constellation cell is sized to nearly the full widget height
+    # (panadapter is much wider than tall, so this still leaves plenty
+    # of horizontal headroom for the wider edge-fade region to show).
+    # Vega ends up near the top, the parallelogram near the bottom,
+    # and the stars span enough vertical distance that the edge-fade
+    # falloff actually reaches its corner-bright value at top/bottom.
+    cell = min(int(h * 0.92), int(w * 0.55))
     cx = w // 2
     cy = int(h * 0.50)
     star_px: dict[str, tuple[int, int, float, float]] = {}
