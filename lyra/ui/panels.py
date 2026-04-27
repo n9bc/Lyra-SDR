@@ -2089,6 +2089,14 @@ class SpectrumPanel(GlassPanel):
         # radio.spectrum_db_range fresh in _gpu_on_spectrum_ready).
         self.widget.db_scale_drag.connect(
             lambda lo, hi: self.radio.set_spectrum_db_range(lo, hi))
+        # Noise-floor reference line (Phase B.10).
+        self.radio.noise_floor_changed.connect(
+            self.widget.set_noise_floor_db)
+        # Operator's noise-floor color override (live updates from
+        # Visuals → Colors).
+        self.widget.set_noise_floor_color(self.radio.noise_floor_color)
+        self.radio.noise_floor_color_changed.connect(
+            self.widget.set_noise_floor_color)
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()

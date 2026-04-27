@@ -266,6 +266,12 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # (start_y, start_min, start_max) while a drag is in flight.
         self._db_drag: Optional[tuple[int, float, float]] = None
 
+        # Noise-floor reference line (Phase B.10). dB value updated
+        # from radio.noise_floor_changed; color may be overridden by
+        # the operator via Visuals → Colors.
+        self._noise_floor_db: Optional[float] = None
+        self._nf_color_hex: str = ""  # empty = use sage-green default
+
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
         # over). Default False — see constructor docstring.
@@ -346,6 +352,23 @@ class SpectrumGpuWidget(QOpenGLWidget):
         """
         self._center_hz = float(center_hz)
         self._span_hz = float(max(1.0, span_hz))
+
+    def set_noise_floor_db(self, db: float) -> None:
+        """Update the noise-floor reference value (Phase B.10).
+
+        Connected to radio.noise_floor_changed in the panel. -999 is
+        the convention for "noise floor disabled" (Visuals checkbox
+        off) — we suppress drawing in that case.
+        """
+        self._noise_floor_db = (
+            None if db < -150.0 else float(db))
+        self.update()
+
+    def set_noise_floor_color(self, hex_str: str) -> None:
+        """Override the noise-floor line color. Empty string =
+        revert to the sage-green default."""
+        self._nf_color_hex = str(hex_str or "")
+        self.update()
 
     # ── Mouse interactions ─────────────────────────────────────────
     def _freq_at_pixel(self, x: int) -> float:
@@ -657,16 +680,45 @@ class SpectrumGpuWidget(QOpenGLWidget):
         Order matters — earlier draws sit underneath later ones.
         Mirrors the original QPainter SpectrumWidget's paint order
         so the visual feel is identical between backends.
-
-        Phase B.4 wires the VFO marker. Successive commits add:
-          - passband overlay (B.6)
-          - notches (B.8)
-          - peak markers (B.10)
-          - noise-floor reference line (B.11)
-          - band-plan strip + landmarks (B.7)
-          - spots (B.9)
         """
+        self._draw_noise_floor(painter)
         self._draw_vfo_marker(painter)
+
+    def _draw_noise_floor(self, painter: QPainter) -> None:
+        """Horizontal dashed line at the noise-floor dB level, with
+        a small "NF -NN dBFS" label at the right edge. Color +
+        styling match the QPainter widget.
+        """
+        if self._noise_floor_db is None:
+            return
+        # Skip if NF is outside the current visible dB range.
+        if not (self._min_db <= self._noise_floor_db <= self._max_db):
+            return
+        h = self.height()
+        w = self.width()
+        if h <= 0 or w <= 0:
+            return
+        span = max(1e-6, self._max_db - self._min_db)
+        nf_y = int(h - ((self._noise_floor_db - self._min_db) / span) * h)
+        nf_y = max(0, min(h - 1, nf_y))
+        # Color — operator override or sage-green default. Alpha is
+        # always 180-ish so the line stays subtle regardless of hue.
+        if self._nf_color_hex:
+            color = QColor(self._nf_color_hex)
+            color.setAlpha(180)
+        else:
+            color = QColor(120, 200, 140, 160)
+        painter.setPen(QPen(color, 1, Qt.DashLine))
+        painter.drawLine(0, nf_y, w, nf_y)
+        # Label, right-justified near the right edge so it doesn't
+        # collide with the trace in the busy middle of the spectrum.
+        from PySide6.QtGui import QFont
+        f = QFont("Consolas")
+        f.setPointSize(8)
+        painter.setFont(f)
+        painter.setPen(QPen(color, 1))
+        painter.drawText(w - 90, nf_y - 3,
+                         f"NF {self._noise_floor_db:+.0f} dBFS")
 
     def _draw_vfo_marker(self, painter: QPainter) -> None:
         """Vertical dashed orange line at the widget's horizontal
