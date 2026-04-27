@@ -498,11 +498,13 @@ class Radio(QObject):
         # auto-shifted by the SPECTRUM_OLD_SCALE_DB_SHIFT migration
         # in app.py:_load_settings so existing users see continuity.
         self._waterfall_palette = "Classic"
-        # Lyra constellation watermark behind the panadapter trace.
-        # Operator-toggleable in Settings → Visuals; persisted to
-        # QSettings. Default ON since it's part of the Lyra brand
-        # identity. Loaded value (if any) is restored in app.py.
-        self._show_lyra_constellation = True
+        # Panadapter background watermark. Operator-toggleable in
+        # Settings → Visuals; persisted to QSettings. Default OFF
+        # for now while we iterate on the visual; flip via the
+        # checkbox to preview. The Lyra constellation rendering is
+        # a placeholder — operator may swap to a different reference
+        # image entirely. Loaded value (if any) restored in app.py.
+        self._show_lyra_constellation = False
         self._spectrum_min_db   = -140.0
         self._spectrum_max_db   = -50.0
         # Operator-set BOUNDS for the spectrum range. Auto-scale is
