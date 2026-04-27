@@ -1,7 +1,8 @@
 """Lyra panadapter watermark.
 
 Renders a Lyra/lyre constellation image as a faint watermark behind
-the spectrum trace. Operator-toggleable in Settings → Visuals.
+the spectrum trace, plus a slow pulsing Vega highlight on top of
+the chosen star. Operator-toggleable in Settings → Visuals.
 
 Asset: lyra/assets/watermarks/lyra-watermark.jpg — a stylized lyre
 silhouette built from constellation stars + connecting lines on a
@@ -9,13 +10,17 @@ dark starfield. Loaded once and cached at the current widget size.
 
 Visual treatment:
   - Centered horizontally on the panadapter
-  - Vertically scaled to fit ~85% of widget height (preserves aspect)
+  - Vertically scaled to fit ~92% of widget height (preserves aspect)
   - Painted with low overall opacity so the trace dominates
   - Composed with CompositionMode_Plus (additive) so the dark
     background pixels of the source image disappear into the black
     panadapter background — only the bright stars / lines / lyre
     edges actually show through. This avoids the otherwise-visible
     "tinted rectangle" effect of a low-alpha dark-blue overlay.
+  - Vega star (one of the bright distinct points in the source
+    image) gets a slow sinusoidal pulse glow rendered on top as a
+    multi-layer additive blob. Driven by time.monotonic() so it
+    animates with the spectrum repaint cadence.
 
 Drawn as the FIRST overlay (under the trace fill, passband, marker,
 etc.) so the spectrum line dominates visually.
@@ -23,11 +28,13 @@ etc.) so the spectrum line dominates visually.
 
 from __future__ import annotations
 
+import math
+import time
 from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPainter, QPixmap
+from PySide6.QtGui import QColor, QPainter, QPixmap
 
 
 # Source image path, relative to this module's location.
@@ -42,8 +49,28 @@ _ASSET_PATH = (
 WATERMARK_OPACITY = 0.35
 
 # Vertical fraction of the panadapter the image occupies (preserved
-# aspect, so width follows). 0.85 leaves a small margin top/bottom.
+# aspect, so width follows). 0.92 leaves a small margin top/bottom.
 WATERMARK_HEIGHT_FRAC = 0.92
+
+# Vega pulse — overlaid on top of the watermark image at the position
+# of one of the brightest visible stars. Position is normalized within
+# the source image (0..1, 0..1) so it tracks under widget resize.
+# Tweakable: nudge x left/right or y up/down to land on a different
+# star in the image if the operator prefers a different focal point.
+VEGA_NX                = 0.45    # ~ above the lyre's left frame
+VEGA_NY                = 0.20
+VEGA_PULSE_PERIOD_S    = 3.5
+VEGA_PULSE_MIN         = 0.40    # alpha multiplier at the dim end
+VEGA_PULSE_MAX         = 1.00    # alpha multiplier at the bright end
+VEGA_CORE_RADIUS_PX    = 4.0
+VEGA_CORE_COLOR        = QColor(230, 240, 255)   # cool blue-white
+# Multi-layer halo for a soft glow look. Each layer is (radius_mult,
+# alpha_mult) — outer layers are bigger and dimmer.
+VEGA_GLOW_LAYERS = (
+    (1.0, 1.00),
+    (2.2, 0.35),
+    (4.0, 0.12),
+)
 
 # Module-level cache. The source pixmap loads once on first draw;
 # the scaled cache rebuilds on widget-size change so we're not
@@ -52,6 +79,18 @@ _source_pixmap: Optional[QPixmap] = None
 _source_load_attempted = False
 _cached_scaled: Optional[QPixmap] = None
 _cached_size: tuple[int, int] = (0, 0)
+
+
+def _vega_pulse_factor() -> float:
+    """0..1 multiplier for Vega's alpha, animated over time.
+
+    Sinusoid scaled to [VEGA_PULSE_MIN, VEGA_PULSE_MAX]. Driven by
+    time.monotonic() so the phase is continuous across paint events
+    without needing a separate QTimer — every panadapter repaint
+    naturally advances the pulse."""
+    phase = (time.monotonic() % VEGA_PULSE_PERIOD_S) / VEGA_PULSE_PERIOD_S
+    s = 0.5 * (1.0 - math.cos(2.0 * math.pi * phase))   # 0..1
+    return VEGA_PULSE_MIN + s * (VEGA_PULSE_MAX - VEGA_PULSE_MIN)
 
 
 def _load_source() -> Optional[QPixmap]:
@@ -104,4 +143,29 @@ def draw(painter: QPainter, w: int, h: int) -> None:
     painter.setCompositionMode(QPainter.CompositionMode_Plus)
     painter.setOpacity(WATERMARK_OPACITY)
     painter.drawPixmap(x, y, pix)
+    painter.restore()
+
+    # Vega pulse — multi-layer additive glow on top of the watermark.
+    # Drawn in its own paint state so the pulse can use higher alpha
+    # than the base watermark (drawing a bright star, not a dim
+    # background image).
+    pulse = _vega_pulse_factor()
+    vega_cx = x + int(VEGA_NX * pix.width())
+    vega_cy = y + int(VEGA_NY * pix.height())
+    painter.save()
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setCompositionMode(QPainter.CompositionMode_Plus)
+    painter.setPen(Qt.NoPen)
+    for radius_mult, alpha_mult in VEGA_GLOW_LAYERS:
+        alpha = int(255 * pulse * alpha_mult)
+        if alpha < 2:
+            continue
+        radius = VEGA_CORE_RADIUS_PX * radius_mult
+        col = QColor(VEGA_CORE_COLOR)
+        col.setAlpha(min(255, alpha))
+        painter.setBrush(col)
+        painter.drawEllipse(
+            int(vega_cx - radius), int(vega_cy - radius),
+            int(radius * 2), int(radius * 2),
+        )
     painter.restore()
