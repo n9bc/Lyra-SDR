@@ -2082,6 +2082,10 @@ class SpectrumPanel(GlassPanel):
         self.widget.right_clicked_freq.connect(self._on_right_click)
         # Mouse-wheel zoom (Phase B.7) — direct passthrough to Radio.
         self.widget.wheel_zoom.connect(self.radio.zoom_step)
+        # Wheel-over-notch (Phase B.14) — adjust that notch's width.
+        self.widget.wheel_at_freq.connect(self._on_wheel)
+        # Drag-on-notch (Phase B.14) — resize notch width via drag.
+        self.widget.notch_q_drag.connect(self._on_notch_q_drag)
         # Y-axis drag for spectrum dB range (Phase B.8) — drag in
         # the right-edge zone shifts both min/max together. Forwards
         # to Radio.set_spectrum_db_range; the new range comes back
@@ -2227,6 +2231,22 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_spectrum(spec_db, center_hz, rate)
 
     def _on_click(self, freq_hz):
+        # CW tuning correction: the CW passband filter sits at the
+        # CW-pitch offset from the carrier (see radio._compute_passband
+        # — CWU's passband centers at +pitch, CWL's at -pitch). If
+        # we set the carrier exactly to the click frequency, the CW
+        # signal would land at DC where the filter doesn't reach, and
+        # the operator would hear silence. Compensating here makes the
+        # click "land on the signal" as the operator expects:
+        #   CWU click → carrier = click_freq - pitch  (so signal sits
+        #               at +pitch baseband, inside the passband)
+        #   CWL click → carrier = click_freq + pitch
+        # Other modes set the carrier exactly to the click freq.
+        mode = self.radio.mode
+        if mode == "CWU":
+            freq_hz = int(freq_hz) - 650   # CWDemod default pitch
+        elif mode == "CWL":
+            freq_hz = int(freq_hz) + 650
         self.radio.set_freq_hz(int(freq_hz))
 
     def _on_spot_clicked(self, freq_hz):
@@ -2524,9 +2544,9 @@ class WaterfallPanel(GlassPanel):
         self.widget = WaterfallGpuWidget()
         self.content_layout().addWidget(self.widget)
         self.radio.waterfall_ready.connect(self._gpu_on_waterfall_ready)
-        # Click-to-tune (Phase B.5).
-        self.widget.clicked_freq.connect(
-            lambda f: self.radio.set_freq_hz(int(f)))
+        # Click-to-tune (Phase B.5) — route through _on_click so the
+        # CW pitch correction applies in GPU mode too.
+        self.widget.clicked_freq.connect(self._on_click)
         # Right-click context menu (Phase B.6) — reuses _on_right_click.
         self.widget.right_clicked_freq.connect(self._on_right_click)
         # Notch markers on the waterfall (Phase B.13).
@@ -2587,6 +2607,22 @@ class WaterfallPanel(GlassPanel):
         self.widget.push_row(spec_db)
 
     def _on_click(self, freq_hz):
+        # CW tuning correction: the CW passband filter sits at the
+        # CW-pitch offset from the carrier (see radio._compute_passband
+        # — CWU's passband centers at +pitch, CWL's at -pitch). If
+        # we set the carrier exactly to the click frequency, the CW
+        # signal would land at DC where the filter doesn't reach, and
+        # the operator would hear silence. Compensating here makes the
+        # click "land on the signal" as the operator expects:
+        #   CWU click → carrier = click_freq - pitch  (so signal sits
+        #               at +pitch baseband, inside the passband)
+        #   CWL click → carrier = click_freq + pitch
+        # Other modes set the carrier exactly to the click freq.
+        mode = self.radio.mode
+        if mode == "CWU":
+            freq_hz = int(freq_hz) - 650   # CWDemod default pitch
+        elif mode == "CWL":
+            freq_hz = int(freq_hz) + 650
         self.radio.set_freq_hz(int(freq_hz))
 
     def _on_right_click(self, freq_hz, shift, global_pos):

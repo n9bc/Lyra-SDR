@@ -183,6 +183,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # Mouse-wheel zoom — payload is direction (+1 = zoom in,
     # -1 = zoom out), one emit per wheel notch.
     wheel_zoom = Signal(int)
+    # Wheel-over-notch — payload is (notch_freq_hz, delta_units).
+    # Panel routes to set_notch_width_at to adjust the notch's width
+    # multiplicatively. Same name as the QPainter widget's signal.
+    wheel_at_freq = Signal(float, int)
+    # Notch-width drag — payload is (notch_freq_hz, new_width_hz).
+    # Emitted while operator drags a notch horizontally to resize it.
+    # Signal name kept for compatibility with the existing panel
+    # _on_notch_q_drag handler (legacy name from when it carried Q).
+    notch_q_drag = Signal(float, float)
     # Y-axis drag in the right-edge dB-label zone — emits proposed
     # (min_db, max_db) range live as the operator drags. Panel
     # forwards to radio.set_spectrum_db_range. Same shape as the
@@ -294,6 +303,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # (abs_freq_hz, width_hz, active, deep). Updated from
         # radio.notches_changed via the panel.
         self._notches: list[tuple[float, float, bool, bool]] = []
+        # Active notch-width drag — None or the abs_freq_hz of the
+        # notch being resized. While set, mouseMoveEvent emits
+        # notch_q_drag with the proposed new width based on the
+        # cursor's horizontal distance from the notch center.
+        self._drag_notch_freq: Optional[float] = None
 
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
@@ -409,6 +423,28 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._notches = list(notches) if notches else []
         self.update()
 
+    # ── Notch hit-test (Phase B.14) ────────────────────────────────
+    def _notch_at_x(self, x: int) -> Optional[float]:
+        """Return abs_freq_hz of the notch whose hit-zone contains
+        x, or None. The hit zone is the visible rectangle expanded
+        to NOTCH_HIT_PX min half-width (matches the QPainter widget)."""
+        if not self._notches or self._span_hz <= 0:
+            return None
+        w = self.width()
+        if w <= 0:
+            return None
+        hz_per_px = self._span_hz / max(1, w)
+        for freq, width_hz, active, deep in self._notches:
+            nf = (freq - self._center_hz) / self._span_hz + 0.5
+            if not (0.0 <= nf <= 1.0):
+                continue
+            nx = int(nf * w)
+            half_px = max(self.NOTCH_HIT_PX,
+                          int(width_hz * 0.5 / hz_per_px))
+            if abs(x - nx) <= half_px:
+                return float(freq)
+        return None
+
     # ── Passband-edge geometry helpers (Phase B.11) ────────────────
     def _passband_edge_px(self) -> tuple[Optional[int], Optional[int]]:
         """Return (x_lo, x_hi) pixels for the passband edges, or
@@ -486,19 +522,25 @@ class SpectrumGpuWidget(QOpenGLWidget):
         return (w - self.DB_SCALE_ZONE_PX) <= x <= w
 
     def mousePressEvent(self, event) -> None:
-        """Mouse button handler. Priority order:
-          1. Passband-edge drag (Phase B.11) — if cursor is near
-             a passband edge halo
-          2. dB-scale drag (Phase B.8) — if in right-edge zone
-          3. Click-to-tune (Phase B.5) — anywhere else with left
-          4. Right-click context menu (Phase B.6)
+        """Mouse button handler. Priority order (left button):
+          1. Notch hit (Phase B.14) — drag-to-resize the notch width
+          2. Passband-edge drag (Phase B.11) — if near passband edge
+          3. dB-scale drag (Phase B.8) — if in right-edge zone
+          4. Click-to-tune (Phase B.5) — anywhere else
+        Right-click → context menu (Phase B.6)
         """
         x = int(event.position().x())
         y = int(event.position().y())
         if event.button() == Qt.LeftButton:
+            notch_freq = self._notch_at_x(x)
+            if notch_freq is not None:
+                # Press on a notch → enter width-drag mode. Suppress
+                # click-to-tune so clicking a notch doesn't retune
+                # the radio. Width updates fire on mouseMoveEvent.
+                self._drag_notch_freq = notch_freq
+                return
             edge = self._passband_edge_at_x(x)
             if edge is not None:
-                # Start passband-edge drag; suppress click-to-tune.
                 self._drag_pb_edge = edge
             elif self._is_in_db_zone(x):
                 self._db_drag = (y, self._min_db, self._max_db)
@@ -513,9 +555,24 @@ class SpectrumGpuWidget(QOpenGLWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        """Live drag dispatch — passband edge OR dB-scale, whichever
-        is currently active."""
+        """Live drag dispatch — notch width / passband edge / dB
+        scale, whichever drag is currently active."""
         x = event.position().x()
+        # Notch width drag — emit notch_q_drag with proposed new width
+        if self._drag_notch_freq is not None and self._span_hz > 0 \
+                and self.width() > 0:
+            hz_per_px = self._span_hz / self.width()
+            center_x = self.width() / 2
+            click_freq = self._center_hz + (x - center_x) * hz_per_px
+            # Width = 2× the absolute distance from notch center to
+            # cursor (in Hz). Clamped to a sensible range; quantized
+            # to 10 Hz.
+            half_width = abs(click_freq - self._drag_notch_freq)
+            new_width = max(10.0, min(8000.0, 2.0 * half_width))
+            new_width = 10.0 * round(new_width / 10.0)
+            self.notch_q_drag.emit(
+                float(self._drag_notch_freq), float(new_width))
+            return
         # Passband-edge drag — emit proposed BW
         if self._drag_pb_edge is not None:
             proposed = self._proposed_bw_from_drag(x)
@@ -541,20 +598,30 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if event.button() == Qt.LeftButton:
             self._db_drag = None
             self._drag_pb_edge = None
+            self._drag_notch_freq = None
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
-        """Mouse wheel = zoom in / out.
+        """Mouse wheel = zoom OR notch-width adjust.
 
-        Phase B.7 minimal: every wheel tick emits wheel_zoom with
-        sign of angleDelta.y(). When B.8 lands and adds notch hit-
-        testing, this will branch — wheel-over-notch will adjust
-        notch width instead of zooming, matching the QPainter
-        widget's wheel_at_freq behavior.
+        Phase B.14: wheel-over-notch adjusts that notch's width
+        (via the wheel_at_freq signal which the panel routes to
+        radio's notch-width API). Wheel over empty spectrum = zoom
+        (wheel_zoom signal).
         """
         dy = event.angleDelta().y()
-        if dy != 0:
-            self.wheel_zoom.emit(1 if dy > 0 else -1)
+        if dy == 0:
+            event.accept()
+            return
+        delta = 1 if dy > 0 else -1
+        x = int(event.position().x())
+        notch_freq = self._notch_at_x(x)
+        if notch_freq is not None:
+            # Wheel over notch → adjust width. Panel handles the
+            # actual width math against radio.set_notch_width_at.
+            self.wheel_at_freq.emit(float(notch_freq), delta)
+        else:
+            self.wheel_zoom.emit(delta)
         event.accept()
 
     # ── QOpenGLWidget virtual method overrides ─────────────────────
@@ -803,6 +870,10 @@ class SpectrumGpuWidget(QOpenGLWidget):
         """dB scale tick labels on the RIGHT edge — '+0', '-10',
         '-20', etc. every other tenth of widget height. Operator can
         read signal levels off the trace at a glance.
+
+        Uses an explicit font + larger size than the QPainter widget
+        because Qt's default font over QOpenGLWidget renders too thin
+        to read against the spectrum trace. Bumped to 9 pt bold.
         """
         h = self.height()
         w = self.width()
@@ -811,11 +882,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
         span = self._max_db - self._min_db
         if span <= 0:
             return
+        from PySide6.QtGui import QFont
+        f = QFont()
+        f.setPointSize(9)
+        f.setBold(True)
+        painter.setFont(f)
         painter.setPen(QPen(self.AXIS_COLOR, 1))
         for i in range(0, 11, 2):
             db = self._max_db - (i / 10) * span
             y = int(h * i / 10)
-            painter.drawText(w - 45, y + 10, f"{db:+.0f}")
+            # Clamp y so text stays inside the widget rect even at
+            # the i=0 (top) and i=10 (bottom) ticks.
+            y_text = max(12, min(h - 4, y + 10))
+            painter.drawText(w - 50, y_text, f"{db:+.0f}")
 
     def _draw_notches(self, painter: QPainter) -> None:
         """Filled rectangle spanning each notch's −3 dB bandwidth,
@@ -883,6 +962,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         w = self.width()
         if h <= 0 or w <= 0 or self._span_hz <= 0:
             return
+        from PySide6.QtGui import QFont
+        f = QFont()
+        f.setPointSize(9)
+        f.setBold(True)
+        painter.setFont(f)
         painter.setPen(QPen(self.AXIS_COLOR, 1))
         for i in range(1, 10):
             x = int(w * i / 10)

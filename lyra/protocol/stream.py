@@ -302,16 +302,39 @@ class HL2Stream:
             so per-channel content (e.g. balance / pan output) survives
             into the AK4951 codec L/R fields of the EP2 audio slot.
 
-        NOTE ON >48 kHz OPERATION: the EP2 audio-slot interpretation is
-        sample-rate-dependent in the HL2 gateware and we don't fully
-        characterize it yet. Earlier nearest-neighbor upsample attempt
-        introduced audible imaging, so we don't touch the audio buffer
-        here. Instead, Radio.set_rate auto-switches the audio output to
-        the PC sound device at rates >48 k. AK4951 output is only
-        guaranteed reliable at 48 k.
+        UPSAMPLING FOR >48 kHz OPERATION
+        --------------------------------
+        EP2 frames go out 1:1 with EP6 RX frames — at the IQ rate, NOT
+        a fixed 48 kHz. So at 96/192/384 k IQ, EP2 frames drain audio
+        from this queue 2/4/8× faster than the demod produces 48 kHz
+        audio. Without rate-matching, the queue empties faster than it
+        fills and the AK4951 plays alternating audio + silence
+        ("chopping" / crackling).
+
+        Fix: upsample 48 kHz audio to the current IQ rate via
+        scipy.signal.resample_poly (polyphase with anti-imaging filter
+        — earlier nearest-neighbor attempts produced HF imaging in the
+        audible band; resample_poly's default Kaiser-window FIR avoids
+        that). At 48 kHz IQ rate, factor = 1 and the call is a no-op
+        passthrough (just returns the input array).
         """
         import numpy as np
         a = np.asarray(audio, dtype=np.float32)
+        # Determine upsample factor from the current stream rate.
+        # _rate is set by the radio's set_rate path during construction
+        # and on every rate change. Defaults to 48000 if uninitialized.
+        rate = getattr(self, "_rate", 48000)
+        factor = max(1, rate // 48000)
+        if factor > 1:
+            from scipy.signal import resample_poly
+            if a.ndim == 1:
+                a = resample_poly(a, up=factor, down=1).astype(np.float32)
+            elif a.ndim == 2 and a.shape[1] == 2:
+                # Resample each channel independently so balance / pan
+                # is preserved. resample_poly expects 1-D input.
+                l = resample_poly(a[:, 0], up=factor, down=1).astype(np.float32)
+                r = resample_poly(a[:, 1], up=factor, down=1).astype(np.float32)
+                a = np.stack((l, r), axis=1)
         if a.ndim == 1:
             # Mono → duplicate to both channels (legacy behavior).
             pairs = list(zip(a.tolist(), a.tolist()))
