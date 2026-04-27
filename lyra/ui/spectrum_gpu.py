@@ -72,7 +72,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen, QSurfaceFormat
 from PySide6.QtOpenGL import (
     QOpenGLBuffer, QOpenGLFunctions_4_3_Core, QOpenGLShader,
@@ -158,13 +158,23 @@ class SpectrumGpuWidget(QOpenGLWidget):
     Public API:
         set_spectrum(spec_db, min_db=-130, max_db=-30)
             Upload one frame of spectrum data. dB → NDC.y mapping
-            uses min_db/max_db as the scale window. Bins below
-            min_db render at the bottom of the widget; bins above
-            max_db at the top.
+            uses min_db/max_db as the scale window.
         set_trace_color(QColor)
-            Set the trace line color. Applied via the trace.frag
-            `traceColor` uniform on the next paint.
+            Set the trace line color.
+        set_tuning(center_hz, span_hz)
+            Tell the widget what frequency window it represents, so
+            interactions like click-to-tune know what frequency the
+            cursor is pointing at.
+
+    Signals:
+        clicked_freq(float)
+            Emitted when the operator left-clicks anywhere on the
+            trace. Payload is the absolute frequency in Hz at the
+            click position. Panel wires this to radio.set_freq_hz.
     """
+
+    # Click-to-tune signal — payload is absolute Hz at click x.
+    clicked_freq = Signal(float)
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -219,6 +229,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
 
         # Trace color — operator-overridable via set_trace_color.
         self._trace_color: tuple[float, float, float, float] = _DEFAULT_TRACE
+
+        # Tuning state — what frequency window the widget currently
+        # represents. Updated via set_tuning(); used by mouse
+        # interactions (click-to-tune) and overlays that need to
+        # know widget-x → frequency mapping. Default values are
+        # placeholders that produce sensible behavior before the
+        # first set_tuning call.
+        self._center_hz: float = 0.0
+        self._span_hz: float = 48000.0
 
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
@@ -282,6 +301,36 @@ class SpectrumGpuWidget(QOpenGLWidget):
             color.redF(), color.greenF(), color.blueF(), color.alphaF(),
         )
         self.update()
+
+    def set_tuning(self, center_hz: float, span_hz: float) -> None:
+        """Tell the widget what frequency window it currently shows.
+
+        center_hz: absolute Hz at widget horizontal-center.
+        span_hz:   total Hz span across widget width.
+
+        Doesn't trigger a repaint — VFO marker is at center pixel
+        either way. Just updates state for click-to-tune math and
+        for any future overlays (passband, peak markers, etc.) that
+        need bin↔frequency mapping.
+        """
+        self._center_hz = float(center_hz)
+        self._span_hz = float(max(1.0, span_hz))
+
+    # ── Mouse interactions ─────────────────────────────────────────
+    def _freq_at_pixel(self, x: int) -> float:
+        """Convert widget-x pixel to absolute frequency in Hz."""
+        w = max(1, self.width())
+        hz_per_px = self._span_hz / w
+        return self._center_hz + (x - w / 2.0) * hz_per_px
+
+    def mousePressEvent(self, event) -> None:
+        """Left-click → emit clicked_freq with the absolute Hz at
+        the click x. Right-click is reserved for the context menu
+        we'll add in B.6."""
+        if event.button() == Qt.LeftButton:
+            f = self._freq_at_pixel(int(event.position().x()))
+            self.clicked_freq.emit(float(f))
+        super().mousePressEvent(event)
 
     # ── QOpenGLWidget virtual method overrides ─────────────────────
 
@@ -578,10 +627,19 @@ class WaterfallGpuWidget(QOpenGLWidget):
 
     Public API:
         push_row(spec_db, min_db=-130, max_db=-30)
-            Append one new row to the top of the waterfall. dB →
-            byte mapping uses min_db/max_db as the dynamic range;
-            values outside the range are clipped.
+            Append one new row to the top of the waterfall.
+        set_palette(palette_rgb)
+            Swap the 256-entry color LUT.
+        set_tuning(center_hz, span_hz)
+            Tell the widget what frequency window it represents.
+
+    Signals:
+        clicked_freq(float)
+            Emitted on left-click; payload is absolute Hz at the
+            click x. Panel wires to radio.set_freq_hz.
     """
+
+    clicked_freq = Signal(float)
 
     # Number of rows in the texture. 600 matches the typical Lyra
     # waterfall height. Allocated once at initializeGL — operator
@@ -672,6 +730,11 @@ class WaterfallGpuWidget(QOpenGLWidget):
         # Each entry: (write_row_index, bytes-of-length-n, n).
         self._pending_uploads: list[tuple[int, bytes, int]] = []
 
+        # Tuning state — what frequency window the widget currently
+        # represents. Updated via set_tuning(); used by click-to-tune.
+        self._center_hz: float = 0.0
+        self._span_hz: float = 48000.0
+
         # Synthetic mode for self-test without a spectrum source.
         # Default False — see constructor docstring.
         self._synthetic_active = bool(synthetic)
@@ -683,6 +746,23 @@ class WaterfallGpuWidget(QOpenGLWidget):
             self._synth_timer.start()
 
     # ── Public data API ────────────────────────────────────────────
+
+    def set_tuning(self, center_hz: float, span_hz: float) -> None:
+        """Tell the widget what frequency window it represents.
+        See SpectrumGpuWidget.set_tuning for the full rationale."""
+        self._center_hz = float(center_hz)
+        self._span_hz = float(max(1.0, span_hz))
+
+    def _freq_at_pixel(self, x: int) -> float:
+        w = max(1, self.width())
+        hz_per_px = self._span_hz / w
+        return self._center_hz + (x - w / 2.0) * hz_per_px
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self.clicked_freq.emit(
+                float(self._freq_at_pixel(int(event.position().x()))))
+        super().mousePressEvent(event)
 
     def set_palette(self, palette_rgb: np.ndarray) -> None:
         """Set the waterfall color palette.

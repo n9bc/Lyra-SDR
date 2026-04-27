@@ -2071,6 +2071,11 @@ class SpectrumPanel(GlassPanel):
         # from Radio each tick so live Settings changes take effect
         # immediately without an extra signal subscription.
         self.radio.spectrum_ready.connect(self._gpu_on_spectrum_ready)
+        # Click-to-tune (Phase B.5). Convert float Hz → int Hz and
+        # forward to Radio. Operator clicks anywhere on the trace
+        # → radio retunes to that freq.
+        self.widget.clicked_freq.connect(
+            lambda f: self.radio.set_freq_hz(int(f)))
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()
@@ -2078,6 +2083,10 @@ class SpectrumPanel(GlassPanel):
             lambda _hex: self._gpu_apply_trace_color())
 
     def _gpu_on_spectrum_ready(self, spec_db, center_hz, rate):
+        # Push tuning info first so any subsequent overlay /
+        # interaction code knows the freq window the widget
+        # represents. The rate IS the span here (samples/sec ↔ Hz).
+        self.widget.set_tuning(center_hz, rate)
         lo, hi = self.radio.spectrum_db_range
         self.widget.set_spectrum(spec_db, min_db=lo, max_db=hi)
 
@@ -2481,6 +2490,9 @@ class WaterfallPanel(GlassPanel):
         self.widget = WaterfallGpuWidget()
         self.content_layout().addWidget(self.widget)
         self.radio.waterfall_ready.connect(self._gpu_on_waterfall_ready)
+        # Click-to-tune (Phase B.5).
+        self.widget.clicked_freq.connect(
+            lambda f: self.radio.set_freq_hz(int(f)))
         # Seed the palette from Radio's current selection, and track
         # changes so the operator's Settings → Visuals → Palette
         # combo flips the waterfall colors live (one 768-byte texture
@@ -2490,6 +2502,7 @@ class WaterfallPanel(GlassPanel):
             self._gpu_apply_palette)
 
     def _gpu_on_waterfall_ready(self, spec_db, center_hz, rate):
+        self.widget.set_tuning(center_hz, rate)
         lo, hi = self.radio.waterfall_db_range
         self.widget.push_row(spec_db, min_db=lo, max_db=hi)
 
