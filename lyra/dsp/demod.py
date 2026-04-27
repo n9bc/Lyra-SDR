@@ -58,77 +58,69 @@ class SSBDemod:
 
 
 class CWDemod:
-    """CW — narrow filter at carrier (DC), then BFO mix to audio pitch.
+    """CW — SSB-style narrow filter, flush against the carrier marker.
 
-    Architecture (rewritten 2026-04-27 per operator request):
+    Architecturally identical to SSBDemod, just with a narrower
+    passband (250..1500 Hz typical instead of 2400). CWU passes
+    0..BW Hz above the carrier, CWL passes 0..BW Hz below. Same
+    HL2 baseband-mirror convention as SSBDemod.
 
-      Old design ("filter at pitch"): the filter passband sat at
-      ±cw_pitch from carrier, so the operator had to tune so the CW
-      signal landed at the pitch (inside the filter). Click-to-tune
-      then needed a pitch correction. The filter visibly sat AWAY
-      from the marker on the panadapter — confusing.
+    The CW pitch knob controls where INSIDE the filter the operator
+    places the signal via click-to-tune, which determines the
+    audible tone:
+      pitch=650, BW=800 → click on CW signal, marker drops 650 Hz
+        below the signal (CWU), signal lands at +650 baseband, heard
+        as a 650 Hz audio tone.
+      pitch=400 → same click action puts marker 400 Hz below, signal
+        at +400 baseband → 400 Hz tone.
 
-      New design ("filter at carrier"): a narrow LPF/BPF centered on
-      DC (symmetric around carrier in baseband) passes the CW signal
-      when the operator tunes exactly to it (signal at DC). A simple
-      BFO multiplication then mixes the result up to the audio pitch
-      so the operator hears a tone. This matches operator intuition:
-      filter sits ON the marker, pitch is purely an audio knob.
-
-      Side benefit: CWU vs CWL distinction collapses for narrow CW
-      filters (the signal IS at DC either way). We keep the
-      `sideband` parameter only to control BFO mix direction (USB =
-      positive pitch tone, LSB = also positive — convention is to
-      hear the same tone regardless, so both currently use +pitch
-      and the parameter is reserved for future use).
-
-    Default: 650 Hz pitch, 250 Hz total bandwidth. Pitch is
-    operator-adjustable via Settings → DSP → CW pitch.
+    For pitch to be audible the BW must be at least pitch + a small
+    skirt. Default BW for CW is therefore 800 Hz. Operator can narrow
+    further (down to ~50 Hz) for crowded contests, in which case
+    they'd typically lower the pitch as well.
     """
 
     def __init__(self, rate: int, pitch_hz: float = 650.0,
-                 bw_hz: float = 250.0, taps: int = 513,
+                 bw_hz: float = 800.0, taps: int = 513,
                  sideband: str = "U"):
         if not _HAVE_SCIPY:
             raise RuntimeError("scipy required")
         self.rate = rate
-        self.pitch_hz = float(pitch_hz)
+        self.pitch_hz = float(pitch_hz)  # advisory; used by panel for click offset
+        self.bw_hz = float(bw_hz)
+        self.taps = int(taps)
         self.sideband = sideband
-        # Narrow lowpass filter, complex-valued LPF at bw/2. Applied
-        # to the complex IQ — passes ±bw/2 around DC, blocks the rest.
-        cutoff = max(50.0, bw_hz / 2.0)
-        self.lpf = firwin(taps, cutoff, fs=rate, window="hann").astype(np.float64)
-        self.state = np.zeros(taps - 1, dtype=np.complex64)
-        # BFO phase counter. Maintained as a sample index so phase
-        # stays continuous across process() calls of varying length —
-        # avoids the click/pop you'd get if every chunk started at
-        # phase zero.
-        self._bfo_index = 0
+        self._build_filter()
+        self.state = np.zeros(self.taps - 1, dtype=np.complex64)
+
+    def _build_filter(self) -> None:
+        """Complex bandpass spanning 0..BW from the carrier, on the
+        side of the carrier dictated by sideband. Mirrors SSBDemod's
+        HL2 baseband convention: USB → filter at NEGATIVE baseband."""
+        low_hz = 0.0
+        high_hz = max(50.0, self.bw_hz)
+        f_center = (low_hz + high_hz) / 2.0
+        half_bw = (high_hz - low_hz) / 2.0
+        proto = firwin(self.taps, half_bw, fs=self.rate,
+                       window="hann").astype(np.float64)
+        n = np.arange(self.taps) - (self.taps - 1) / 2.0
+        # Same convention as SSBDemod: USB sits at NEGATIVE baseband
+        # on the HL2 gateware.
+        sign = -1.0 if self.sideband.upper().startswith("U") else +1.0
+        phasor = np.exp(sign * 1j * 2.0 * np.pi * f_center * n / self.rate)
+        self.lpf = (proto * phasor).astype(np.complex64)
 
     def set_pitch_hz(self, pitch_hz: float) -> None:
-        """Update the BFO pitch live. No filter rebuild needed —
-        the filter sits at DC, only the BFO mix frequency changes."""
+        """Pitch is advisory for CWDemod (filter is flush against
+        marker, not centered on pitch). Stored so external callers
+        can read it back; no filter rebuild needed."""
         self.pitch_hz = float(pitch_hz)
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         if iq.size == 0:
             return np.zeros(0, dtype=np.float32)
-        # 1. Narrow filter centered at DC
-        filt, self.state = lfilter(self.lpf, 1.0, iq, zi=self.state)
-        # 2. BFO: mix up to the pitch tone. Continuous phase via
-        #    monotonic sample index modulo (rate / pitch) cycle.
-        n = filt.size
-        idx = np.arange(self._bfo_index, self._bfo_index + n)
-        self._bfo_index += n
-        # Phase wrap to keep float precision over long sessions —
-        # at 48 kHz we'd hit float-precision issues after ~10 min.
-        if self._bfo_index > self.rate * 600:
-            self._bfo_index %= self.rate
-        phase = 2.0 * np.pi * self.pitch_hz * idx / self.rate
-        bfo = np.exp(1j * phase)
-        # 3. Output: real part of (filtered IQ × BFO). Real part of
-        #    the mix gives the cosine-quadrature audio tone.
-        return np.real(filt * bfo).astype(np.float32)
+        out, self.state = lfilter(self.lpf, 1.0, iq, zi=self.state)
+        return (np.real(out) * 2.0).astype(np.float32)
 
 
 class DSBDemod:

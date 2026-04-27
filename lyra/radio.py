@@ -260,7 +260,7 @@ class Radio(QObject):
     }
     BW_DEFAULTS = {
         "LSB": 2400,  "USB": 2400,
-        "CWL": 250,   "CWU": 250,
+        "CWL": 800,   "CWU": 800,
         "DSB": 5000,
         "AM":  6000,
         "FM":  10000,
@@ -850,30 +850,21 @@ class Radio(QObject):
         Conventions:
           USB / DIGU         : center .. center + BW
           LSB / DIGL         : center - BW .. center
-          CWU / CWL          : center - BW/2 .. center + BW/2
-                                (filter is ON the marker — operator
-                                tunes the signal to carrier; CWDemod's
-                                internal BFO mixes filtered baseband
-                                up to the audio pitch)
+          CWU                : center .. center + BW   (flush, like USB)
+          CWL                : center - BW .. center   (flush, like LSB)
+                                (CW filter is SSB-style — the cw_pitch
+                                value determines where in that filter
+                                the operator places the signal via
+                                click-to-tune, which sets the audible
+                                tone; pitch does not move the filter)
           AM / DSB / FM      : center - BW/2 .. center + BW/2
-
-        CW redesign 2026-04-27: the CW filter is now centered on DC
-        (carrier), not offset to ±cw_pitch as before. The pitch
-        becomes a pure audio knob (BFO frequency) instead of also
-        controlling filter position. This makes click-to-tune work
-        without a pitch correction in the panel handler, and the
-        visual passband sits over the signal the operator wants to
-        hear instead of beside it.
         """
         mode = self._mode
         bw = int(self._rx_bw_by_mode.get(mode, 2400))
-        if mode in ("USB", "DIGU"):
+        if mode in ("USB", "DIGU", "CWU"):
             return (0, bw)
-        if mode in ("LSB", "DIGL"):
+        if mode in ("LSB", "DIGL", "CWL"):
             return (-bw, 0)
-        if mode in ("CWU", "CWL"):
-            half = bw // 2
-            return (-half, half)
         if mode in ("AM", "DSB", "FM"):
             half = bw // 2
             return (-half, half)

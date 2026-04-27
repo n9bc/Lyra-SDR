@@ -11,8 +11,8 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QComboBox, QDoubleSpinBox, QHBoxLayout, QLabel, QLineEdit, QMenu,
-    QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout,
-    QWidget,
+    QPushButton, QSizePolicy, QSlider, QSpinBox, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 from lyra.radio import Radio
@@ -304,16 +304,40 @@ class ModeFilterPanel(GlassPanel):
         self.tx_bw_combo.currentIndexChanged.connect(self._on_tx_bw_changed)
         h.addLayout(_pair("TX BW", self.tx_bw_combo))
 
+        # CW pitch — operator-adjustable audio tone for CW modes.
+        # Hidden outside CWU/CWL since it has no meaning there. Range
+        # 200..1500 Hz covers operator preference (low-pitch fans tune
+        # ~400, contesters often run 600-700, some prefer 800+).
+        self.cw_pitch_label = QLabel("CW Pitch")
+        self.cw_pitch_spin = QSpinBox()
+        self.cw_pitch_spin.setRange(200, 1500)
+        self.cw_pitch_spin.setSingleStep(10)
+        self.cw_pitch_spin.setSuffix(" Hz")
+        self.cw_pitch_spin.setFixedWidth(95)
+        self.cw_pitch_spin.setValue(int(radio.cw_pitch_hz))
+        self.cw_pitch_spin.setToolTip(
+            "Audio tone heard for tuned CW signals. Click-to-tune places "
+            "the marker this many Hz away from the signal so it lands "
+            "inside the filter at the chosen pitch."
+        )
+        self.cw_pitch_spin.valueChanged.connect(self.radio.set_cw_pitch_hz)
+        h.addWidget(self.cw_pitch_label)
+        h.addWidget(self.cw_pitch_spin)
+
         h.addStretch(1)
         self.content_layout().addLayout(h)
 
         self._refresh_bw_combos()
+        self._update_cw_pitch_visibility()
 
         radio.mode_changed.connect(self._on_mode_changed)
         radio.rate_changed.connect(self._on_rate_changed)
         radio.rx_bw_changed.connect(self._on_radio_rx_bw_changed)
         radio.tx_bw_changed.connect(self._on_radio_tx_bw_changed)
         radio.bw_lock_changed.connect(self.lock_btn.setChecked)
+        # Keep the spinner in sync if pitch changes elsewhere (e.g.
+        # the Settings → DSP duplicate of the same control).
+        radio.cw_pitch_changed.connect(self._on_radio_cw_pitch_changed)
 
     @staticmethod
     def _select_combo_data(combo: QComboBox, value):
@@ -351,6 +375,20 @@ class ModeFilterPanel(GlassPanel):
         self.mode_combo.setCurrentText(mode)
         self.mode_combo.blockSignals(False)
         self._refresh_bw_combos()
+        self._update_cw_pitch_visibility()
+
+    def _update_cw_pitch_visibility(self):
+        is_cw = self.radio.mode in ("CWU", "CWL")
+        self.cw_pitch_label.setVisible(is_cw)
+        self.cw_pitch_spin.setVisible(is_cw)
+
+    def _on_radio_cw_pitch_changed(self, pitch_hz: int):
+        # Keep our spinner in sync when the pitch is changed from
+        # another UI surface (Settings → DSP). Block signals to avoid
+        # a feedback loop back into radio.set_cw_pitch_hz.
+        self.cw_pitch_spin.blockSignals(True)
+        self.cw_pitch_spin.setValue(int(pitch_hz))
+        self.cw_pitch_spin.blockSignals(False)
 
     def _on_rate_changed(self, rate: int):
         self.rate_combo.blockSignals(True)
@@ -2071,11 +2109,10 @@ class SpectrumPanel(GlassPanel):
         # from Radio each tick so live Settings changes take effect
         # immediately without an extra signal subscription.
         self.radio.spectrum_ready.connect(self._gpu_on_spectrum_ready)
-        # Click-to-tune (Phase B.5). Convert float Hz → int Hz and
-        # forward to Radio. Operator clicks anywhere on the trace
-        # → radio retunes to that freq.
-        self.widget.clicked_freq.connect(
-            lambda f: self.radio.set_freq_hz(int(f)))
+        # Click-to-tune (Phase B.5). Routed through _on_click so CW
+        # modes get the pitch offset compensation (signal lands inside
+        # the SSB-style filter at +/- pitch from the marker).
+        self.widget.clicked_freq.connect(self._on_click)
         # Right-click context menu (Phase B.6). Reuses the same
         # handlers as the QPainter path — _on_right_click handles
         # the shift+right quick-remove + plain-right menu logic.
@@ -2231,17 +2268,17 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_spectrum(spec_db, center_hz, rate)
 
     def _on_click(self, freq_hz):
-        # Click-to-tune: set carrier exactly to the click frequency
-        # for ALL modes. Earlier versions applied a CW pitch offset
-        # here (because the CW filter used to sit at ±pitch from
-        # carrier, so the signal had to land at the pitch to be
-        # inside the filter). The 2026-04-27 CW redesign moved the
-        # filter ON the carrier with the BFO inside CWDemod producing
-        # the audio pitch tone, so the click correction is no longer
-        # needed — the signal lands at the carrier (DC), inside the
-        # filter, the BFO mixes it up to the operator's chosen
-        # audible pitch tone.
-        self.radio.set_freq_hz(int(freq_hz))
+        # Click-to-tune. CW filters sit OFFSET from the marker by
+        # ±cw_pitch (CWU passband above the marker, CWL below). For
+        # the clicked signal to land INSIDE the filter we tune the
+        # marker to (signal - pitch) for CWU, or (signal + pitch)
+        # for CWL. Other modes tune directly.
+        target = int(freq_hz)
+        mode = self.radio.mode
+        if mode in ("CWU", "CWL"):
+            pitch = int(self.radio.cw_pitch_hz)
+            target += -pitch if mode == "CWU" else +pitch
+        self.radio.set_freq_hz(target)
 
     def _on_spot_clicked(self, freq_hz):
         # User clicked on a spot marker — tune + emit TCI spot_activated.
@@ -2601,17 +2638,17 @@ class WaterfallPanel(GlassPanel):
         self.widget.push_row(spec_db)
 
     def _on_click(self, freq_hz):
-        # Click-to-tune: set carrier exactly to the click frequency
-        # for ALL modes. Earlier versions applied a CW pitch offset
-        # here (because the CW filter used to sit at ±pitch from
-        # carrier, so the signal had to land at the pitch to be
-        # inside the filter). The 2026-04-27 CW redesign moved the
-        # filter ON the carrier with the BFO inside CWDemod producing
-        # the audio pitch tone, so the click correction is no longer
-        # needed — the signal lands at the carrier (DC), inside the
-        # filter, the BFO mixes it up to the operator's chosen
-        # audible pitch tone.
-        self.radio.set_freq_hz(int(freq_hz))
+        # Click-to-tune. CW filters sit OFFSET from the marker by
+        # ±cw_pitch (CWU passband above the marker, CWL below). For
+        # the clicked signal to land INSIDE the filter we tune the
+        # marker to (signal - pitch) for CWU, or (signal + pitch)
+        # for CWL. Other modes tune directly.
+        target = int(freq_hz)
+        mode = self.radio.mode
+        if mode in ("CWU", "CWL"):
+            pitch = int(self.radio.cw_pitch_hz)
+            target += -pitch if mode == "CWU" else +pitch
+        self.radio.set_freq_hz(target)
 
     def _on_right_click(self, freq_hz, shift, global_pos):
         # Mirrors SpectrumPanel — both gestures gated on notch_enabled
