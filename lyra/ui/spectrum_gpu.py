@@ -72,8 +72,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QTimer
-from PySide6.QtGui import QColor, QSurfaceFormat
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QPainter, QPen, QSurfaceFormat
 from PySide6.QtOpenGL import (
     QOpenGLBuffer, QOpenGLFunctions_4_3_Core, QOpenGLShader,
     QOpenGLShaderProgram, QOpenGLTexture, QOpenGLVertexArrayObject,
@@ -480,6 +480,59 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._trace_xy[:n, 0] = xs
         self._trace_xy[:n, 1] = ys
         self._trace_n = n
+
+    # ── QPainter overlay pass (Phase B.4+ feature parity) ──────────
+    #
+    # QOpenGLWidget supports a paintEvent override that runs AFTER
+    # the GL drawing (paintGL) finishes. We use it to layer QPainter-
+    # drawn overlays — VFO marker, passband, notches, peak markers,
+    # band-plan strip, spots, etc. — on top of the GPU-rendered
+    # trace. This is the "hybrid" approach: GL handles the heavy
+    # per-frame data drawing (the trace itself, ~1500 line segments
+    # collapsed to one draw call), QPainter handles the lighter
+    # overlay work (a few rectangles + lines + text per frame). Best
+    # of both worlds: GPU acceleration where it matters, code reuse
+    # from the existing QPainter widget where it doesn't.
+
+    def paintEvent(self, event) -> None:
+        # Standard QOpenGLWidget machinery — runs initializeGL on
+        # first call, resizeGL on resize, paintGL every frame. After
+        # super returns, the GL framebuffer has been swapped to
+        # screen and the widget is in QPainter-able state.
+        super().paintEvent(event)
+        # Now draw QPainter overlays on top of the GL output.
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            self._draw_overlays(painter)
+        finally:
+            painter.end()
+
+    def _draw_overlays(self, painter: QPainter) -> None:
+        """Draw all QPainter overlays in the right order.
+
+        Order matters — earlier draws sit underneath later ones.
+        Mirrors the original QPainter SpectrumWidget's paint order
+        so the visual feel is identical between backends.
+
+        Phase B.4 wires the VFO marker. Successive commits add:
+          - passband overlay (B.6)
+          - notches (B.8)
+          - peak markers (B.10)
+          - noise-floor reference line (B.11)
+          - band-plan strip + landmarks (B.7)
+          - spots (B.9)
+        """
+        self._draw_vfo_marker(painter)
+
+    def _draw_vfo_marker(self, painter: QPainter) -> None:
+        """Vertical dashed orange line at the widget's horizontal
+        center — that's where the radio is tuned. Color + alpha +
+        line style match the QPainter SpectrumWidget exactly so the
+        feel is identical on backend swap."""
+        cx = self.width() // 2
+        painter.setPen(QPen(QColor(255, 170, 80, 220), 1, Qt.DashLine))
+        painter.drawLine(cx, 0, cx, self.height())
 
     # ── GL teardown ────────────────────────────────────────────────
     def _cleanup_gl_resources(self) -> None:
@@ -1006,6 +1059,34 @@ class WaterfallGpuWidget(QOpenGLWidget):
         bump = 70 * np.exp(-((x - center) ** 2) / (2 * width * width))
         spec += bump.astype(np.float32)
         self._push_row_internal(spec, min_db=-130.0, max_db=-30.0)
+
+    # ── QPainter overlay pass ──────────────────────────────────────
+    # See SpectrumGpuWidget.paintEvent for the full rationale on the
+    # GL-then-QPainter hybrid approach.
+
+    def paintEvent(self, event) -> None:
+        super().paintEvent(event)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            self._draw_overlays(painter)
+        finally:
+            painter.end()
+
+    def _draw_overlays(self, painter: QPainter) -> None:
+        """Phase B.4 wires the VFO marker. Successive commits add
+        notch markers (B.8) — the only other waterfall overlay
+        the QPainter widget has."""
+        self._draw_vfo_marker(painter)
+
+    def _draw_vfo_marker(self, painter: QPainter) -> None:
+        """Vertical dashed orange line at the widget center. Slightly
+        more transparent than the spectrum widget's version (alpha
+        180 vs 220) so it doesn't fight the bright signal columns
+        in the waterfall — matches the QPainter WaterfallWidget."""
+        cx = self.width() // 2
+        painter.setPen(QPen(QColor(255, 170, 80, 180), 1, Qt.DashLine))
+        painter.drawLine(cx, 0, cx, self.height())
 
     # ── GL teardown ────────────────────────────────────────────────
     def _cleanup_gl_resources(self) -> None:
