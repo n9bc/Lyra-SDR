@@ -73,7 +73,12 @@ WATERMARK_WIDTH_STRETCH = 1.30
 # move Vega up or down on the marker line.
 VEGA_NX                = 0.50
 VEGA_NY                = 0.20
-VEGA_PULSE_PERIOD_S    = 3.5
+# Two slow incommensurable periods summed = naturalistic, non-
+# repeating-looking pulse. Single-sine approach felt mechanical.
+# Periods are primes so the combined cycle is 11×17 = 187 s before
+# the phase pattern repeats — effectively never within a session.
+VEGA_PERIOD_A_S        = 11.0
+VEGA_PERIOD_B_S        = 17.0
 VEGA_PULSE_MIN         = 0.40    # alpha multiplier at the dim end
 VEGA_PULSE_MAX         = 1.00    # alpha multiplier at the bright end
 VEGA_CORE_RADIUS_PX    = 4.0
@@ -98,12 +103,19 @@ _cached_size: tuple[int, int] = (0, 0)
 def _vega_pulse_factor() -> float:
     """0..1 multiplier for Vega's alpha, animated over time.
 
-    Sinusoid scaled to [VEGA_PULSE_MIN, VEGA_PULSE_MAX]. Driven by
-    time.monotonic() so the phase is continuous across paint events
-    without needing a separate QTimer — every panadapter repaint
-    naturally advances the pulse."""
-    phase = (time.monotonic() % VEGA_PULSE_PERIOD_S) / VEGA_PULSE_PERIOD_S
-    s = 0.5 * (1.0 - math.cos(2.0 * math.pi * phase))   # 0..1
+    Sum of two slow sinusoids at incommensurable periods (11 s and
+    17 s). The sum has a complex envelope that doesn't audibly /
+    visibly repeat over a session — sometimes the two are in phase
+    and you get a bright peak, sometimes they're opposed and Vega
+    sits at its dim baseline for several seconds. Reads as
+    organically random rather than metronome-mechanical.
+
+    Driven by time.monotonic() so phase is continuous across paint
+    events without needing a separate QTimer."""
+    t = time.monotonic()
+    a = 0.5 * (1.0 - math.cos(2.0 * math.pi * t / VEGA_PERIOD_A_S))
+    b = 0.5 * (1.0 - math.cos(2.0 * math.pi * t / VEGA_PERIOD_B_S))
+    s = 0.5 * (a + b)   # 0..1, biased toward middle by central limit
     return VEGA_PULSE_MIN + s * (VEGA_PULSE_MAX - VEGA_PULSE_MIN)
 
 
