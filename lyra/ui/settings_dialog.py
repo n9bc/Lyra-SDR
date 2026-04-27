@@ -774,6 +774,22 @@ class DspSettingsTab(QWidget):
         # CWDemod offset, the panadapter passband overlay position,
         # and the click-to-tune CW correction so all three stay in
         # sync. Persisted via QSettings (radio handles save).
+        #
+        # FUTURE-MOVE NOTE: when TX lands, CW transmission needs
+        # additional operator settings — break-in mode (semi / full
+        # BK / off), keying speed (WPM), weight (dot:dash ratio),
+        # sidetone level, paddle reverse, possibly memory/macro
+        # buffers. At that point this single "CW pitch" group should
+        # graduate into either:
+        #   (a) A dedicated "CW" tab alongside Radio / Network / DSP
+        #       / Audio / Visuals / Keyer / Bands, OR
+        #   (b) A "CW" subsection added to the Keyer tab (which is
+        #       already CW-adjacent for paddle / iambic config),
+        #       OR
+        #   (c) Stay-in-place with the rest of CW grouped here on
+        #       the DSP tab if the additional controls are few.
+        # Pick the right home when TX scope is clearer. For now,
+        # DSP tab is fine since pitch is a pure RX-side concern.
         grp_cw = QGroupBox("CW pitch")
         gc = QGridLayout(grp_cw)
         gc.addWidget(QLabel("Pitch (Hz):"), 0, 0)
