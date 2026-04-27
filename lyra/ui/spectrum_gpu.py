@@ -180,6 +180,9 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # menu at the click site; shift_held preserves the legacy
     # shift+right = remove-nearest-notch quick gesture.
     right_clicked_freq = Signal(float, bool, QPoint)
+    # Mouse-wheel zoom — payload is direction (+1 = zoom in,
+    # -1 = zoom out), one emit per wheel notch.
+    wheel_zoom = Signal(int)
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -346,6 +349,20 @@ class SpectrumGpuWidget(QOpenGLWidget):
             self.right_clicked_freq.emit(
                 float(f), shift_held, event.globalPosition().toPoint())
         super().mousePressEvent(event)
+
+    def wheelEvent(self, event) -> None:
+        """Mouse wheel = zoom in / out.
+
+        Phase B.7 minimal: every wheel tick emits wheel_zoom with
+        sign of angleDelta.y(). When B.8 lands and adds notch hit-
+        testing, this will branch — wheel-over-notch will adjust
+        notch width instead of zooming, matching the QPainter
+        widget's wheel_at_freq behavior.
+        """
+        dy = event.angleDelta().y()
+        if dy != 0:
+            self.wheel_zoom.emit(1 if dy > 0 else -1)
+        event.accept()
 
     # ── QOpenGLWidget virtual method overrides ─────────────────────
 

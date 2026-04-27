@@ -2080,6 +2080,8 @@ class SpectrumPanel(GlassPanel):
         # handlers as the QPainter path — _on_right_click handles
         # the shift+right quick-remove + plain-right menu logic.
         self.widget.right_clicked_freq.connect(self._on_right_click)
+        # Mouse-wheel zoom (Phase B.7) — direct passthrough to Radio.
+        self.widget.wheel_zoom.connect(self.radio.zoom_step)
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()
