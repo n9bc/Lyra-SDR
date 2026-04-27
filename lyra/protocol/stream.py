@@ -220,24 +220,20 @@ class HL2Stream:
 
         # TX audio queue. Demod pipeline pushes float samples [-1, 1] at
         # 48 kHz. The AK4951 codec on the HL2+ is hard-locked at 48 kHz
-        # regardless of EP6 IQ rate — confirmed against AKM datasheet
-        # and HL2 gateware. EP2 frames go out 1:1 with EP6 RX frames
-        # (so 1520 frames/s at 192 k IQ vs. 380 frames/s at 48 k), but
-        # the gateware's audio path only consumes one sample per
-        # IQ_rate/48000 EP2 audio slots. We therefore pack real 48 k
-        # audio samples into 1-of-N slot positions per frame and zero-
-        # fill the rest. Same pattern pihpsdr / Thetis use; matches the
-        # gateware's 1-of-N picker.
+        # fs regardless of EP6 IQ rate. To keep the codec from being
+        # over-fed at higher IQ rates we throttle EP2 frame emission
+        # to a fixed 380 Hz cadence (= 48 kHz audio / 126 samples per
+        # frame), decoupled from EP6 cadence. See _rx_loop. Same shape
+        # Thetis uses (where the network TX thread is paced by the LR
+        # audio semaphore at 48 k regardless of EP6 rate).
         from collections import deque
-        # 1 s buffer at 48 kHz is plenty — caps unbounded growth if the
-        # demod produces faster than the EP2 builder consumes (rare,
-        # but a safety net).
+        # 1 s buffer at 48 kHz — caps unbounded growth if the demod
+        # produces faster than the EP2 builder consumes.
         self._tx_audio: deque = deque(maxlen=48000)
         self._tx_audio_lock = threading.Lock()
-        # Cross-frame phase counter for 1-of-N audio slot placement.
-        # Resets to 0 on rate change so the slot pattern stays in sync
-        # with what the HL2 gateware expects after a sample-rate flip.
-        self._tx_audio_phase = 0
+        # EP2 cadence throttle: increments every EP6 frame; keepalive
+        # only fires when count % (sample_rate/48000) == 0.
+        self._ep6_count = 0
         self.tx_audio_gain = 0.5
         # Opt-in: pack audio into EP2 frames. When False (default), the TX
         # audio slots are left at zero. Turn this on only for AK4951 output.
@@ -279,58 +275,20 @@ class HL2Stream:
         return bytes(frame)
 
     def _pack_audio_bytes(self, n_samples: int) -> bytes:
-        """Pack n_samples audio slots for one EP2 frame.
+        """Dequeue up to n_samples, pad with zeros, pack as HPSDR TX stereo.
 
-        Queue items are (L, R) float tuples at 48 kHz. The AK4951 codec
-        on the HL2+ is hard-locked at 48 kHz fs, so we have to match
-        that rate regardless of how fast EP2 frames are emitted.
-
-        At 48 kHz IQ rate, EP2 frames go out at 380/s and N=1: every
-        audio slot carries a real 48 kHz sample (current behavior).
-
-        At higher IQ rates (96/192/384 k), EP2 frames are emitted at
-        2/4/8x the cadence, so we'd over-feed the AK4951 if we packed
-        a real sample in every slot. Instead we pack one real sample
-        every N slots (N = sample_rate // 48000) and zero-fill the
-        rest. The gateware reads slots at 48 kHz pace, picking 1-of-N,
-        so the audio rate the codec actually sees stays at 48 kHz.
-
-        Phase tracking across frames: `self._tx_audio_phase` carries
-        the 1-of-N alignment from one frame to the next so the slot
-        pattern is continuous and the gateware's picker stays in sync.
+        Queue items are (L, R) float tuples at 48 kHz. EP2 frames are
+        rate-throttled at the call site so this function always sees
+        a 48 kHz cadence — every slot carries a real sample.
         """
         import numpy as np
-        n = max(1, self.sample_rate // 48000)  # 1, 2, 4, 8
-
-        # Indices within this frame that carry real audio. At N=1 this
-        # is every slot. At N=4 it's every 4th slot, with the starting
-        # offset chosen so the cadence picks up where last frame ended.
-        if n == 1:
-            real_idxs = range(n_samples)
-        else:
-            first = (n - self._tx_audio_phase) % n
-            real_idxs = range(first, n_samples, n)
-            self._tx_audio_phase = (self._tx_audio_phase + n_samples) % n
-        n_real = len(real_idxs) if n > 1 else n_samples
-
-        # Pull only the real samples we need from the 48 kHz audio queue.
         with self._tx_audio_lock:
-            avail = min(len(self._tx_audio), n_real)
+            avail = min(len(self._tx_audio), n_samples)
             pulled = [self._tx_audio.popleft() for _ in range(avail)]
-        if avail < n_real:
-            pulled.extend([(0.0, 0.0)] * (n_real - avail))
-
-        # Build a full (n_samples, 2) array. At N=1 it's just `pulled`;
-        # at N>1 we splat the real samples into `real_idxs`, leaving
-        # the rest as zeros (the gateware ignores the filler slots).
-        if n == 1:
-            lr = np.asarray(pulled, dtype=np.float32)
-        else:
-            lr = np.zeros((n_samples, 2), dtype=np.float32)
-            for slot_idx, sample in zip(real_idxs, pulled):
-                lr[slot_idx, 0] = sample[0]
-                lr[slot_idx, 1] = sample[1]
-
+        if avail < n_samples:
+            pulled.extend([(0.0, 0.0)] * (n_samples - avail))
+        # pulled is a list of (L, R) tuples — split into separate arrays.
+        lr = np.asarray(pulled, dtype=np.float32)        # shape (N, 2)
         lr *= self.tx_audio_gain
         np.clip(lr, -1.0, 1.0, out=lr)
         int16 = (lr * 32767.0).astype(">i2")             # shape (N, 2) big-endian
@@ -455,11 +413,10 @@ class HL2Stream:
         if self._sock is None:
             raise RuntimeError("stream not started")
         self.sample_rate = rate
-        # Reset 1-of-N audio slot phase so the new rate's slot pattern
-        # starts cleanly aligned. Without this, switching from 192 k to
-        # 48 k would carry a stale phase that produces a half-frame of
-        # mis-aligned audio until the next phase wrap.
-        self._tx_audio_phase = 0
+        # Reset EP2 cadence counter so the new rate's keepalive
+        # cadence starts clean. Without this, switching from 192 k to
+        # 48 k would carry stale counter modulo state.
+        self._ep6_count = 0
         rate_code = SAMPLE_RATES[rate]
         self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
         self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
@@ -529,8 +486,19 @@ class HL2Stream:
 
             on_samples(samples, self.stats)
 
-            # Keepalive: one EP2 frame per received EP6 frame, or the radio's
-            # TX queue underruns and it halts the stream after ~N seconds.
+            # EP2 cadence is decoupled from EP6 cadence and locked to
+            # 48 kHz audio rate. At 48 k IQ that's 1:1 with EP6; at
+            # 96/192/384 k we send EP2 every 2/4/8 EP6 frames so the
+            # AK4951 codec (hard-locked at 48 kHz fs) doesn't get
+            # over-fed and crackle. Mirrors Thetis's design where the
+            # network TX thread is paced by the LR audio semaphore at
+            # 48 k regardless of EP6 rate. HL2 keepalive watchdog is
+            # plenty fast at 380 Hz so this doesn't trigger an
+            # underrun-halt.
+            n = max(1, self.sample_rate // 48000)
+            self._ep6_count = getattr(self, "_ep6_count", 0) + 1
+            if self._ep6_count % n != 0:
+                continue
             try:
                 c0, c1, c2, c3, c4 = self._keepalive_cc
                 self._send_cc(c0, c1, c2, c3, c4)
