@@ -63,9 +63,14 @@ WATERMARK_WIDTH_STRETCH = 1.30
 # Vega pulse — overlaid on top of the watermark image at the position
 # of one of the brightest visible stars. Position is normalized within
 # the source image (0..1, 0..1) so it tracks under widget resize.
-# Tweakable: nudge x left/right or y up/down to land on a different
-# star in the image if the operator prefers a different focal point.
-VEGA_NX                = 0.45    # ~ above the lyre's left frame
+#
+# NX = 0.50 puts Vega exactly on the panadapter's horizontal center,
+# which is also where the VFO frequency marker line lives. The
+# pulsing star then visually coincides with the tuned-frequency
+# marker — a deliberate brand moment ("the radio is tuned to Vega"
+# motif). Keep NX at 0.50 to preserve this alignment; nudge NY to
+# move Vega up or down on the marker line.
+VEGA_NX                = 0.50
 VEGA_NY                = 0.20
 VEGA_PULSE_PERIOD_S    = 3.5
 VEGA_PULSE_MIN         = 0.40    # alpha multiplier at the dim end
