@@ -142,6 +142,10 @@ class Radio(QObject):
     # Lyra constellation watermark visibility behind the panadapter
     # trace. Wired to both spectrum widget backends.
     lyra_constellation_changed = Signal(bool)
+    # Occasional meteor streaks across the panadapter — separate
+    # toggle from the constellation watermark so operators can run
+    # one, the other, both, or neither.
+    lyra_meteors_changed       = Signal(bool)
     spectrum_db_range_changed  = Signal(float, float)  # (min_db, max_db)
     spectrum_cal_db_changed    = Signal(float)         # operator cal trim, dB
     smeter_cal_db_changed      = Signal(float)         # S-meter cal trim, dB
@@ -504,6 +508,10 @@ class Radio(QObject):
         # to QSettings. Default ON since it's part of the brand
         # identity. Loaded value (if any) is restored in app.py.
         self._show_lyra_constellation = True
+        # Occasional meteors — opt-in flair, off by default. Spawn
+        # gap 15..50 s, max 1 visible at a time. Independent of the
+        # constellation watermark.
+        self._show_lyra_meteors = False
         self._spectrum_min_db   = -140.0
         self._spectrum_max_db   = -50.0
         # Operator-set BOUNDS for the spectrum range. Auto-scale is
@@ -1989,6 +1997,22 @@ class Radio(QObject):
             return
         self._waterfall_palette = name
         self.waterfall_palette_changed.emit(name)
+
+    @property
+    def show_lyra_meteors(self) -> bool:
+        return self._show_lyra_meteors
+
+    def set_show_lyra_meteors(self, visible: bool) -> None:
+        """Toggle occasional meteor streaks across the panadapter.
+        Independent of the constellation watermark; persisted via
+        QSettings."""
+        v = bool(visible)
+        if v == self._show_lyra_meteors:
+            return
+        self._show_lyra_meteors = v
+        from PySide6.QtCore import QSettings as _QS
+        _QS("N8SDR", "Lyra").setValue("visuals/show_lyra_meteors", v)
+        self.lyra_meteors_changed.emit(v)
 
     @property
     def show_lyra_constellation(self) -> bool:

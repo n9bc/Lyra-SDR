@@ -1184,6 +1184,21 @@ class VisualsSettingsTab(QWidget):
             self.radio.set_show_lyra_constellation)
         gp.addWidget(self.lyra_const_check, 1, 0, 1, 2, Qt.AlignLeft)
 
+        self.lyra_meteors_check = QCheckBox(
+            "Occasional meteors across panadapter")
+        self.lyra_meteors_check.setChecked(
+            bool(self.radio.show_lyra_meteors))
+        self.lyra_meteors_check.setToolTip(
+            "Subtle ambient meteor streaks that pass through the "
+            "panadapter at random intervals (15–50 seconds apart, "
+            "one at a time, ~0.5–0.8 s each). Independent of the "
+            "constellation watermark — turn either on or off "
+            "without affecting the other."
+        )
+        self.lyra_meteors_check.toggled.connect(
+            self.radio.set_show_lyra_meteors)
+        gp.addWidget(self.lyra_meteors_check, 2, 0, 1, 2, Qt.AlignLeft)
+
         v.addWidget(grp_pal)
 
         # ── dB ranges (spectrum + waterfall) ──────────────────────

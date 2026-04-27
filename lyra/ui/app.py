@@ -1765,6 +1765,11 @@ class MainWindow(QMainWindow):
             if isinstance(v, str):
                 v = v.lower() in ("1", "true", "yes")
             r.set_show_lyra_constellation(bool(v))
+        if s.contains("visuals/show_lyra_meteors"):
+            v = s.value("visuals/show_lyra_meteors")
+            if isinstance(v, str):
+                v = v.lower() in ("1", "true", "yes")
+            r.set_show_lyra_meteors(bool(v))
         # ── Cal-fix migration ──────────────────────────────────────
         # The 0.0.2 release fixed the FFT normalization to be true
         # dBFS — every reading drops by ~34 dB compared to earlier

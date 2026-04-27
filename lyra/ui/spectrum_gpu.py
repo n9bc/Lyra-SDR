@@ -306,6 +306,9 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Lyra constellation watermark visibility — operator toggle.
         # Default ON; switched via Settings → Visuals.
         self._show_constellation: bool = True
+        # Occasional meteor streaks across the panadapter — independent
+        # toggle, default OFF (opt-in flair).
+        self._show_meteors: bool = False
 
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
@@ -433,6 +436,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
     def set_show_constellation(self, visible: bool) -> None:
         """Toggle the Lyra constellation watermark behind the trace."""
         self._show_constellation = bool(visible)
+        self.update()
+
+    def set_show_meteors(self, visible: bool) -> None:
+        """Toggle occasional meteor streaks across the panadapter."""
+        self._show_meteors = bool(visible)
         self.update()
 
     def set_notches(self, notches: list) -> None:
@@ -883,6 +891,12 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if self._show_constellation:
             from lyra.ui.constellation import draw as draw_constellation
             draw_constellation(painter, self.width(), self.height())
+        # Occasional meteors — opt-in flair, drawn after the watermark
+        # so the streaks composite cleanly on top of any visible
+        # constellation pixels. Independent toggle.
+        if self._show_meteors:
+            from lyra.ui.constellation import draw_meteors
+            draw_meteors(painter, self.width(), self.height())
         self._draw_passband(painter)
         self._draw_noise_floor(painter)
         self._draw_db_scale_labels(painter)

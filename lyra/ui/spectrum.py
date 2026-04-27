@@ -91,6 +91,9 @@ class SpectrumWidget(_PaintedWidget):
         # Lyra constellation watermark visibility — operator toggle.
         # Default ON; switched via Settings → Visuals.
         self._show_constellation: bool = True
+        # Occasional meteor streaks across the panadapter — independent
+        # toggle, default OFF (opt-in flair).
+        self._show_meteors: bool = False
         self._passband_hi_hz: int = 0
         # Noise-floor reference line. None = hidden; otherwise draw a
         # muted dashed horizontal line at the corresponding y-pixel.
@@ -183,6 +186,11 @@ class SpectrumWidget(_PaintedWidget):
     def set_show_constellation(self, visible: bool) -> None:
         """Toggle the Lyra constellation watermark behind the trace."""
         self._show_constellation = bool(visible)
+        self.update()
+
+    def set_show_meteors(self, visible: bool) -> None:
+        """Toggle occasional meteor streaks across the panadapter."""
+        self._show_meteors = bool(visible)
         self.update()
 
     def set_spectrum_trace_color(self, hex_str: str):
@@ -702,6 +710,11 @@ class SpectrumWidget(_PaintedWidget):
         if getattr(self, "_show_constellation", True):
             from lyra.ui.constellation import draw as _draw_constellation
             _draw_constellation(p, w, h)
+        # Occasional meteors — opt-in flair, drawn just after the
+        # watermark so streaks composite over any visible stars.
+        if getattr(self, "_show_meteors", False):
+            from lyra.ui.constellation import draw_meteors as _draw_meteors
+            _draw_meteors(p, w, h)
 
         # ── Band-plan overlay ─────────────────────────────────────
         # Top strip: colored sub-band segments (CW / DIG / SSB / FM)
