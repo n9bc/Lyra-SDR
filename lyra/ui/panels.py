@@ -2082,6 +2082,13 @@ class SpectrumPanel(GlassPanel):
         self.widget.right_clicked_freq.connect(self._on_right_click)
         # Mouse-wheel zoom (Phase B.7) — direct passthrough to Radio.
         self.widget.wheel_zoom.connect(self.radio.zoom_step)
+        # Y-axis drag for spectrum dB range (Phase B.8) — drag in
+        # the right-edge zone shifts both min/max together. Forwards
+        # to Radio.set_spectrum_db_range; the new range comes back
+        # to the widget on the next spectrum_ready tick (we read
+        # radio.spectrum_db_range fresh in _gpu_on_spectrum_ready).
+        self.widget.db_scale_drag.connect(
+            lambda lo, hi: self.radio.set_spectrum_db_range(lo, hi))
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()

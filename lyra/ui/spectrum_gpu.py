@@ -183,6 +183,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # Mouse-wheel zoom — payload is direction (+1 = zoom in,
     # -1 = zoom out), one emit per wheel notch.
     wheel_zoom = Signal(int)
+    # Y-axis drag in the right-edge dB-label zone — emits proposed
+    # (min_db, max_db) range live as the operator drags. Panel
+    # forwards to radio.set_spectrum_db_range. Same shape as the
+    # QPainter widget's signal.
+    db_scale_drag = Signal(float, float)
+
+    # Width of the right-edge strip that grabs dB-scale drag instead
+    # of click-to-tune. Matches the QPainter widget's value.
+    DB_SCALE_ZONE_PX = 50
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -247,6 +256,16 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._center_hz: float = 0.0
         self._span_hz: float = 48000.0
 
+        # Latest (min_db, max_db) range — stashed by set_spectrum
+        # each frame so the Y-axis drag handler knows where to start
+        # from. Default placeholders match the QPainter widget.
+        self._min_db: float = -130.0
+        self._max_db: float = -30.0
+
+        # dB-scale drag state. None when not dragging; tuple of
+        # (start_y, start_min, start_max) while a drag is in flight.
+        self._db_drag: Optional[tuple[int, float, float]] = None
+
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
         # over). Default False — see constructor docstring.
@@ -282,6 +301,10 @@ class SpectrumGpuWidget(QOpenGLWidget):
         n = int(min(spec_db.shape[0], MAX_BINS))
         if n < 2:
             return
+        # Cache the range so the Y-axis drag handler knows the
+        # current (min, max) to compute proposed deltas from.
+        self._min_db = float(min_db)
+        self._max_db = float(max_db)
         # Map bins → NDC.x: linear from -1 (left) to +1 (right).
         xs = np.linspace(-1.0, 1.0, n, dtype=np.float32)
         # Map dB → NDC.y: linear from -1 (bottom = min_db) to +1
@@ -331,24 +354,63 @@ class SpectrumGpuWidget(QOpenGLWidget):
         hz_per_px = self._span_hz / w
         return self._center_hz + (x - w / 2.0) * hz_per_px
 
+    def _is_in_db_zone(self, x: int) -> bool:
+        """True if x falls in the right-edge dB-scale grab strip."""
+        w = self.width()
+        return (w - self.DB_SCALE_ZONE_PX) <= x <= w
+
     def mousePressEvent(self, event) -> None:
         """Mouse button handler.
 
-        Left-click  → emit clicked_freq (absolute Hz at click x).
-        Right-click → emit right_clicked_freq with (freq, shift_held,
-                       globalPos) so the panel can pop the notch
-                       context menu OR run the shift+right quick-
-                       remove gesture.
+        Left-click in main area  → emit clicked_freq (tune to that Hz)
+        Left-click in right edge → start dB-scale drag (Phase B.8)
+        Right-click              → emit right_clicked_freq for the
+                                    notch context menu / shift+right
+                                    quick-remove gesture.
         """
         x = int(event.position().x())
-        f = self._freq_at_pixel(x)
+        y = int(event.position().y())
         if event.button() == Qt.LeftButton:
-            self.clicked_freq.emit(float(f))
+            if self._is_in_db_zone(x):
+                # Start dB-scale drag — store the start state. The
+                # drag becomes "live" via mouseMoveEvent emitting
+                # db_scale_drag.
+                self._db_drag = (y, self._min_db, self._max_db)
+            else:
+                self.clicked_freq.emit(float(self._freq_at_pixel(x)))
         elif event.button() == Qt.RightButton:
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
             self.right_clicked_freq.emit(
-                float(f), shift_held, event.globalPosition().toPoint())
+                float(self._freq_at_pixel(x)),
+                shift_held,
+                event.globalPosition().toPoint())
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        """While dragging in the right-edge zone, compute a new
+        (min_db, max_db) range based on vertical mouse delta and
+        emit db_scale_drag. Pan mode only — both edges shift
+        together. Range is clamped to [-150, 0] dBFS with at least
+        a 3 dB span (matches the QPainter widget)."""
+        if self._db_drag is not None:
+            start_y, start_min, start_max = self._db_drag
+            dy = int(event.position().y()) - start_y
+            h = max(1, self.height())
+            span = start_max - start_min
+            # Drag UP (negative dy) → raise both edges (intuitive
+            # "lift the dB scale" feel; matches QPainter widget).
+            db_delta = -dy * (span / h)
+            new_min = start_min + db_delta
+            new_max = start_max + db_delta
+            new_min = max(-150.0, min(-3.0, new_min))
+            new_max = max(new_min + 3.0, min(0.0, new_max))
+            self.db_scale_drag.emit(float(new_min), float(new_max))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton:
+            self._db_drag = None
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
         """Mouse wheel = zoom in / out.
