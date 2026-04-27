@@ -45,15 +45,25 @@ auto-discover should work.
 
 ## AK4951 audio is distorted / chopped
 
-Check the **Rate** combo on Mode+Filter. AK4951 output only works at
-**48 kHz IQ rate**. At 96 / 192 / 384 k the EP2 audio drain rate
-outruns the 48 kHz demod output and the gap fills with zeros → the
-audible result is a square-wave chop. Drop Rate to 48 k.
+Rare in current builds. The AK4951 codec is a 48 kHz audio chip
+(matches the HPSDR EP2 audio protocol slot, also 48 kHz), and Lyra
+demodulates to 48 kHz audio regardless of which IQ spectrum rate
+(48 / 96 / 192 / 384 k) you have selected. Audio path is independent
+of spectrum rate.
 
-Recent Lyra builds automatically route audio to PC Soundcard when
-Rate > 48 k, and block manual AK4951 selection in that state — but
-if you saved a config before that guard was in place, you might
-still see the old behavior. Just drop the rate, then pick AK4951.
+If you DO hear chopping or distortion on AK4951 output:
+
+- Check that gateware is current (older HL2+ gateware had bugs in
+  the EP2 audio routing). Flash the current HL2+ gateware.
+- Check **Volume** isn't past the saturation point on the DSP+Audio
+  panel.
+- Try briefly switching to **PC Soundcard** out, confirm the audio
+  itself sounds clean there. If PC is also chopped, the problem is
+  in the demod path, not AK4951 specifically.
+- Pre-v0.0.5 Lyra builds had broken auto-routing logic that flipped
+  audio output between AK4951 and PC Soundcard whenever you changed
+  IQ rate or band. If you're seeing inexplicable output flipping,
+  upgrade to v0.0.5+.
 
 ## Audio silent but spectrum is alive
 

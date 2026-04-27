@@ -773,25 +773,20 @@ class Radio(QObject):
         self._rebuild_notches()
         self.rate_changed.emit(rate)
 
-        # AK4951 path works reliably only at 48 kHz — at higher IQ
-        # rates the EP2 audio-slot drain outpaces the 48 kHz demod
-        # feed, producing zero-interleaved silence ("chopped audio").
-        # Auto-fallback to the PC sound-device sink at higher rates,
-        # restore AK4951 when rate returns to 48 k. The operator's
-        # chosen preference is remembered in _preferred_audio_output.
-        if not hasattr(self, "_preferred_audio_output"):
-            self._preferred_audio_output = self._audio_output
-        if rate > 48000 and self._audio_output == "AK4951":
-            self._preferred_audio_output = "AK4951"
-            self.set_audio_output("PC Soundcard")
-            self.status_message.emit(
-                f"Audio routed to PC soundcard at {rate//1000} k "
-                "(AK4951 requires 48 k)", 4000)
-        elif rate == 48000 and self._preferred_audio_output == "AK4951" \
-                and self._audio_output != "AK4951":
-            self.set_audio_output("AK4951")
-            self.status_message.emit(
-                "Audio restored to AK4951 at 48 k", 2500)
+        # NOTE: previous versions auto-switched audio output from
+        # AK4951 → PC Soundcard whenever IQ rate > 48 k, on the
+        # premise that "AK4951 requires 48 k IQ rate." That premise
+        # was wrong. The AK4951 codec runs at 48 kHz audio rate
+        # always — that's the chip spec AND it's what every
+        # downstream consumer (speakers, WSJT-X, fldigi, audio
+        # routing software) wants. The HPSDR EP2 audio protocol slot
+        # is also 48 kHz regardless of IQ rate. So the audio path is
+        # totally independent of the IQ spectrum rate; "demod stays
+        # at 48 k while spectrum runs at 192/384 k" is the design,
+        # not a bug. Confirmed empirically by the operator running
+        # AK4951 cleanly at 192 k IQ for an extended session.
+        # Therefore: no auto-switch. Operator's audio output choice
+        # is sticky across rate (and band, mode, etc.) changes.
 
     def _rebuild_notches(self):
         """Re-design every notch's underlying filter — needed when
