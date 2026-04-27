@@ -14,8 +14,11 @@ rem   - Python 3.11+ on PATH (via `py launcher` or python.exe)
 rem   - pip install pyinstaller (>= 6.0)
 rem   - All Lyra runtime requirements installed (pip install -r
 rem     requirements.txt)
-rem   - Inno Setup 6 installed at the default location
-rem     (C:\Program Files (x86)\Inno Setup 6\ISCC.exe)
+rem   - Inno Setup 6 installed (system-wide or per-user via winget).
+rem     ISCC.exe is located automatically; checked paths (in order):
+rem       %ProgramFiles(x86)%\Inno Setup 6\ISCC.exe
+rem       %ProgramFiles%\Inno Setup 6\ISCC.exe
+rem       %LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
 rem
 rem Before bumping the version on a release:
 rem   1. Edit lyra\__init__.py — bump __version__, __version_name__,
@@ -36,7 +39,19 @@ if errorlevel 1 (
 
 echo.
 echo === Step 2/2: Inno Setup =============================
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" build\installer.iss
+set "ISCC="
+set "PFx86=%ProgramFiles(x86)%"
+if exist "%PFx86%\Inno Setup 6\ISCC.exe"                         set "ISCC=%PFx86%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%ProgramFiles%\Inno Setup 6\ISCC.exe"           set "ISCC=%ProgramFiles%\Inno Setup 6\ISCC.exe"
+if not defined ISCC if exist "%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"  set "ISCC=%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe"
+if not defined ISCC (
+    echo Inno Setup 6 not found. Searched:
+    echo   %PFx86%\Inno Setup 6\ISCC.exe
+    echo   %ProgramFiles%\Inno Setup 6\ISCC.exe
+    echo   %LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe
+    exit /b 1
+)
+"%ISCC%" build\installer.iss
 if errorlevel 1 (
     echo Inno Setup failed; aborting.
     exit /b 1
