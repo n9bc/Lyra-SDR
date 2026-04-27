@@ -260,7 +260,7 @@ class Radio(QObject):
     }
     BW_DEFAULTS = {
         "LSB": 2400,  "USB": 2400,
-        "CWL": 800,   "CWU": 800,
+        "CWL": 250,   "CWU": 250,
         "DSB": 5000,
         "AM":  6000,
         "FM":  10000,
@@ -850,21 +850,32 @@ class Radio(QObject):
         Conventions:
           USB / DIGU         : center .. center + BW
           LSB / DIGL         : center - BW .. center
-          CWU                : center .. center + BW   (flush, like USB)
-          CWL                : center - BW .. center   (flush, like LSB)
-                                (CW filter is SSB-style — the cw_pitch
-                                value determines where in that filter
-                                the operator places the signal via
-                                click-to-tune, which sets the audible
-                                tone; pitch does not move the filter)
+          CWU                : center + pitch - BW/2 .. center + pitch + BW/2
+          CWL                : center - pitch - BW/2 .. center - pitch + BW/2
+                                (CW filter is centered on the pitch.
+                                The visible gap between the marker and
+                                the passband rectangle IS the zero-beat
+                                indicator — tune until the CW signal
+                                sits inside the offset rectangle.
+                                Click-to-tune handles the offset for
+                                you. Decoupled from BW so narrow
+                                contest filters stay usable.)
           AM / DSB / FM      : center - BW/2 .. center + BW/2
         """
         mode = self._mode
         bw = int(self._rx_bw_by_mode.get(mode, 2400))
-        if mode in ("USB", "DIGU", "CWU"):
+        if mode in ("USB", "DIGU"):
             return (0, bw)
-        if mode in ("LSB", "DIGL", "CWL"):
+        if mode in ("LSB", "DIGL"):
             return (-bw, 0)
+        if mode == "CWU":
+            half = bw // 2
+            p = int(self._cw_pitch_hz)
+            return (p - half, p + half)
+        if mode == "CWL":
+            half = bw // 2
+            p = int(self._cw_pitch_hz)
+            return (-p - half, -p + half)
         if mode in ("AM", "DSB", "FM"):
             half = bw // 2
             return (-half, half)
