@@ -198,6 +198,8 @@ class SpectrumGpuWidget(QOpenGLWidget):
     DB_SCALE_ZONE_PX = 50
     # Click halo around each passband edge for grab detection.
     PASSBAND_HIT_PX = 6
+    # Click halo around each notch (also the minimum visual width).
+    NOTCH_HIT_PX = 14
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -287,6 +289,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._passband_hi_hz: float = 0.0
         # Active passband-edge drag — None or "lo" / "hi".
         self._drag_pb_edge: Optional[str] = None
+
+        # Notch markers (Phase B.13). Each entry is
+        # (abs_freq_hz, width_hz, active, deep). Updated from
+        # radio.notches_changed via the panel.
+        self._notches: list[tuple[float, float, bool, bool]] = []
 
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
@@ -392,6 +399,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         overlay rectangle on the next paint."""
         self._passband_lo_hz = float(lo_hz)
         self._passband_hi_hz = float(hi_hz)
+        self.update()
+
+    def set_notches(self, notches: list) -> None:
+        """Set the notch list for overlay drawing (Phase B.13).
+        notches: list of (abs_freq_hz, width_hz, active, deep)
+        tuples — same shape as Radio.notch_details. Connected to
+        radio.notches_changed."""
+        self._notches = list(notches) if notches else []
         self.update()
 
     # ── Passband-edge geometry helpers (Phase B.11) ────────────────
@@ -778,6 +793,7 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._draw_noise_floor(painter)
         self._draw_db_scale_labels(painter)
         self._draw_vfo_marker(painter)
+        self._draw_notches(painter)
         self._draw_freq_scale_labels(painter)
 
     # ── Axis labels ─────────────────────────────────────────────────
@@ -800,6 +816,62 @@ class SpectrumGpuWidget(QOpenGLWidget):
             db = self._max_db - (i / 10) * span
             y = int(h * i / 10)
             painter.drawText(w - 45, y + 10, f"{db:+.0f}")
+
+    def _draw_notches(self, painter: QPainter) -> None:
+        """Filled rectangle spanning each notch's −3 dB bandwidth,
+        with edge outlines (thicker for 'deep'/cascaded notches)
+        and a center hairline. Inactive notches render in muted
+        grey. Width labels appear when there's room. Color +
+        styling match the QPainter widget verbatim so notch UX
+        feels identical between backends."""
+        if not self._notches or self._span_hz <= 0:
+            return
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+        hz_per_px = self._span_hz / max(1, w)
+        from PySide6.QtGui import QFont
+        label_font = QFont()
+        label_font.setPointSize(8)
+        for freq, width_hz, active, deep in self._notches:
+            nf = (freq - self._center_hz) / self._span_hz + 0.5
+            if not (0.0 <= nf <= 1.0):
+                continue
+            nx = int(nf * w)
+            half_px = max(self.NOTCH_HIT_PX,
+                          int(width_hz * 0.5 / hz_per_px))
+            x_start = max(0, nx - half_px)
+            x_end = min(w - 1, nx + half_px)
+            if x_end <= x_start:
+                continue
+            if active:
+                fill = QColor(220, 60, 60, 110)
+                line = QColor(240, 80, 80, 230)
+                label_color = QColor(255, 200, 200)
+            else:
+                fill = QColor(140, 140, 150, 80)
+                line = QColor(170, 170, 180, 180)
+                label_color = QColor(170, 170, 180)
+            # Filled rectangle covering the full notch bandwidth.
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(fill)
+            painter.drawRect(x_start, 0, x_end - x_start, h)
+            # Edge outlines — thicker for cascaded ("deep") notches.
+            edge_width = 3 if deep else 1
+            painter.setPen(QPen(line, edge_width, Qt.SolidLine))
+            painter.drawLine(x_start, 0, x_start, h)
+            painter.drawLine(x_end, 0, x_end, h)
+            # Center hairline for precise targeting.
+            painter.setPen(QPen(line, 1, Qt.SolidLine))
+            painter.drawLine(nx, 0, nx, h)
+            # Width label, only if there's room.
+            if half_px >= 8 and nx + half_px + 60 < w:
+                suffix = "^" if deep else ""
+                painter.setPen(label_color)
+                painter.setFont(label_font)
+                painter.drawText(nx + half_px + 4, 14,
+                                 f"{int(round(width_hz))}{suffix} Hz")
 
     def _draw_freq_scale_labels(self, painter: QPainter) -> None:
         """Frequency tick labels at the BOTTOM — kHz with one
@@ -1038,6 +1110,12 @@ class WaterfallGpuWidget(QOpenGLWidget):
         self._center_hz: float = 0.0
         self._span_hz: float = 48000.0
 
+        # Notch markers (Phase B.13). Each entry is
+        # (abs_freq_hz, width_hz, active, deep) — same shape as
+        # the spectrum widget's notch list. Updated from
+        # radio.notches_changed via the panel.
+        self._notches: list[tuple[float, float, bool, bool]] = []
+
         # Synthetic mode for self-test without a spectrum source.
         # Default False — see constructor docstring.
         self._synthetic_active = bool(synthetic)
@@ -1071,6 +1149,18 @@ class WaterfallGpuWidget(QOpenGLWidget):
             self.right_clicked_freq.emit(
                 float(f), shift_held, event.globalPosition().toPoint())
         super().mousePressEvent(event)
+
+    def set_notches(self, notches: list) -> None:
+        """Set the notch list for waterfall overlay drawing.
+        Identical contract to SpectrumGpuWidget.set_notches —
+        connected to radio.notches_changed."""
+        self._notches = list(notches) if notches else []
+        self.update()
+
+    # Notch click-halo / minimum-visible-width — matches the
+    # spectrum widget so a notch grabbable on one widget is also
+    # grabbable on the other.
+    NOTCH_HIT_PX = 14
 
     def set_palette(self, palette_rgb: np.ndarray) -> None:
         """Set the waterfall color palette.
@@ -1462,9 +1552,7 @@ class WaterfallGpuWidget(QOpenGLWidget):
             painter.end()
 
     def _draw_overlays(self, painter: QPainter) -> None:
-        """Phase B.4 wires the VFO marker. Successive commits add
-        notch markers (B.8) — the only other waterfall overlay
-        the QPainter widget has."""
+        self._draw_notches(painter)
         self._draw_vfo_marker(painter)
 
     def _draw_vfo_marker(self, painter: QPainter) -> None:
@@ -1475,6 +1563,41 @@ class WaterfallGpuWidget(QOpenGLWidget):
         cx = self.width() // 2
         painter.setPen(QPen(QColor(255, 170, 80, 180), 1, Qt.DashLine))
         painter.drawLine(cx, 0, cx, self.height())
+
+    def _draw_notches(self, painter: QPainter) -> None:
+        """Notch markers on the waterfall — same red/grey filled
+        rectangles as the spectrum widget but slightly more
+        transparent so they don't drown out the underlying signal
+        traces. Matches the QPainter WaterfallWidget."""
+        if not self._notches or self._span_hz <= 0:
+            return
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+        hz_per_px = self._span_hz / max(1, w)
+        for freq, width_hz, active, deep in self._notches:
+            nf = (freq - self._center_hz) / self._span_hz + 0.5
+            if not (0.0 <= nf <= 1.0):
+                continue
+            nx = int(nf * w)
+            half_px = max(self.NOTCH_HIT_PX,
+                          int(width_hz * 0.5 / hz_per_px))
+            if active:
+                fill = QColor(220, 60, 60, 95)
+                line = QColor(240, 80, 80, 220)
+            else:
+                fill = QColor(140, 140, 150, 70)
+                line = QColor(170, 170, 180, 170)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(fill)
+            painter.drawRect(nx - half_px, 0, 2 * half_px, h)
+            edge_width = 3 if deep else 1
+            painter.setPen(QPen(line, edge_width, Qt.SolidLine))
+            painter.drawLine(nx - half_px, 0, nx - half_px, h)
+            painter.drawLine(nx + half_px, 0, nx + half_px, h)
+            painter.setPen(QPen(line, 1, Qt.SolidLine))
+            painter.drawLine(nx, 0, nx, h)
 
     # ── GL teardown ────────────────────────────────────────────────
     def _cleanup_gl_resources(self) -> None:

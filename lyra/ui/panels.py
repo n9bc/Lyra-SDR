@@ -2101,6 +2101,9 @@ class SpectrumPanel(GlassPanel):
         pb_lo, pb_hi = self.radio._compute_passband()
         self.widget.set_passband(pb_lo, pb_hi)
         self.radio.passband_changed.connect(self.widget.set_passband)
+        # Notch markers (Phase B.13) — seed + track changes.
+        self.widget.set_notches(self.radio.notch_details)
+        self.radio.notches_changed.connect(self.widget.set_notches)
         # Drag-edge-to-resize-RX-BW (Phase B.11). Operator pulls a
         # cyan edge → widget emits proposed BW (Hz, already
         # quantized + clamped) → push straight into Radio for the
@@ -2526,6 +2529,9 @@ class WaterfallPanel(GlassPanel):
             lambda f: self.radio.set_freq_hz(int(f)))
         # Right-click context menu (Phase B.6) — reuses _on_right_click.
         self.widget.right_clicked_freq.connect(self._on_right_click)
+        # Notch markers on the waterfall (Phase B.13).
+        self.widget.set_notches(self.radio.notch_details)
+        self.radio.notches_changed.connect(self.widget.set_notches)
         # Seed the palette from Radio's current selection, and track
         # changes so the operator's Settings → Visuals → Palette
         # combo flips the waterfall colors live (one 768-byte texture
