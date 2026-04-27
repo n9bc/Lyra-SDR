@@ -2097,6 +2097,16 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_noise_floor_color(self.radio.noise_floor_color)
         self.radio.noise_floor_color_changed.connect(
             self.widget.set_noise_floor_color)
+        # Passband overlay (Phase B.11) — seed + track changes.
+        pb_lo, pb_hi = self.radio._compute_passband()
+        self.widget.set_passband(pb_lo, pb_hi)
+        self.radio.passband_changed.connect(self.widget.set_passband)
+        # Drag-edge-to-resize-RX-BW (Phase B.11). Operator pulls a
+        # cyan edge → widget emits proposed BW (Hz, already
+        # quantized + clamped) → push straight into Radio for the
+        # current mode.
+        self.widget.passband_edge_drag.connect(
+            lambda bw: self.radio.set_rx_bw(self.radio.mode, int(bw)))
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()

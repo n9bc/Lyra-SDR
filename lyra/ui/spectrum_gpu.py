@@ -189,9 +189,15 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # QPainter widget's signal.
     db_scale_drag = Signal(float, float)
 
+    # Passband-edge drag — emits proposed RX BW in Hz (already
+    # clamped + quantized). Panel forwards to radio.set_rx_bw.
+    passband_edge_drag = Signal(int)
+
     # Width of the right-edge strip that grabs dB-scale drag instead
     # of click-to-tune. Matches the QPainter widget's value.
     DB_SCALE_ZONE_PX = 50
+    # Click halo around each passband edge for grab detection.
+    PASSBAND_HIT_PX = 6
 
     # Synthetic-data point count — mimics Lyra's typical FFT size
     # (4096) so the test exercises the same draw cost as real usage.
@@ -271,6 +277,16 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # the operator via Visuals → Colors.
         self._noise_floor_db: Optional[float] = None
         self._nf_color_hex: str = ""  # empty = use sage-green default
+
+        # Passband overlay (Phase B.11). lo/hi are Hz offsets from
+        # the carrier (negative = below, positive = above). For USB
+        # we have lo=0, hi=+bw; for LSB lo=-bw, hi=0; for SSB-equiv
+        # symmetric modes lo=-bw/2, hi=+bw/2; CW has both off-center
+        # by the pitch.
+        self._passband_lo_hz: float = 0.0
+        self._passband_hi_hz: float = 0.0
+        # Active passband-edge drag — None or "lo" / "hi".
+        self._drag_pb_edge: Optional[str] = None
 
         # Synthetic-data animation state. _synthetic_active toggles
         # OFF the moment set_spectrum() is called (real data takes
@@ -370,6 +386,78 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._nf_color_hex = str(hex_str or "")
         self.update()
 
+    def set_passband(self, lo_hz: float, hi_hz: float) -> None:
+        """RX filter passband, as Hz offsets from the carrier.
+        Connected to radio.passband_changed. Updates the cyan
+        overlay rectangle on the next paint."""
+        self._passband_lo_hz = float(lo_hz)
+        self._passband_hi_hz = float(hi_hz)
+        self.update()
+
+    # ── Passband-edge geometry helpers (Phase B.11) ────────────────
+    def _passband_edge_px(self) -> tuple[Optional[int], Optional[int]]:
+        """Return (x_lo, x_hi) pixels for the passband edges, or
+        (None, None) if the passband is invalid / not visible."""
+        if self._passband_hi_hz <= self._passband_lo_hz:
+            return (None, None)
+        if self._span_hz <= 0:
+            return (None, None)
+        w = self.width()
+        if w <= 0:
+            return (None, None)
+        hz_per_px = self._span_hz / w
+        center_x = w / 2
+        x_lo = int(center_x + self._passband_lo_hz / hz_per_px)
+        x_hi = int(center_x + self._passband_hi_hz / hz_per_px)
+        return (x_lo, x_hi)
+
+    def _passband_edge_at_x(self, x: float) -> Optional[str]:
+        """Return 'lo', 'hi', or None depending on whether x is
+        within PASSBAND_HIT_PX of a passband edge."""
+        x_lo, x_hi = self._passband_edge_px()
+        if x_lo is None or x_hi is None:
+            return None
+        if abs(x - x_lo) <= self.PASSBAND_HIT_PX:
+            return "lo"
+        if abs(x - x_hi) <= self.PASSBAND_HIT_PX:
+            return "hi"
+        return None
+
+    def _proposed_bw_from_drag(self, x: float) -> Optional[int]:
+        """Translate a drag cursor x-position into a new proposed RX
+        BW in Hz, clamped + quantized. None if the result would be
+        nonsensical for the current passband geometry. Logic ported
+        verbatim from the QPainter widget."""
+        if self._span_hz <= 0 or self.width() <= 0:
+            return None
+        hz_per_px = self._span_hz / self.width()
+        center_x = self.width() / 2
+        offset_hz = (x - center_x) * hz_per_px
+        lo, hi = self._passband_lo_hz, self._passband_hi_hz
+        edge = self._drag_pb_edge
+        if edge is None:
+            return None
+        if lo == 0 and hi > 0:
+            # USB / DIGU
+            if edge != "hi":
+                return None
+            bw = int(round(offset_hz))
+        elif hi == 0 and lo < 0:
+            # LSB / DIGL
+            if edge != "lo":
+                return None
+            bw = int(round(-offset_hz))
+        elif lo < 0 and hi > 0 and abs(lo + hi) <= max(5, abs(lo) // 20):
+            # Symmetric around carrier
+            bw = int(round(2 * abs(offset_hz)))
+        else:
+            # CW asymmetric — pitch center = (lo + hi) / 2
+            pitch_center = (lo + hi) / 2
+            bw = int(round(2 * abs(offset_hz - pitch_center)))
+        bw = max(50, min(15000, bw))
+        bw = 50 * ((bw + 25) // 50)
+        return bw
+
     # ── Mouse interactions ─────────────────────────────────────────
     def _freq_at_pixel(self, x: int) -> float:
         """Convert widget-x pixel to absolute frequency in Hz."""
@@ -383,21 +471,21 @@ class SpectrumGpuWidget(QOpenGLWidget):
         return (w - self.DB_SCALE_ZONE_PX) <= x <= w
 
     def mousePressEvent(self, event) -> None:
-        """Mouse button handler.
-
-        Left-click in main area  → emit clicked_freq (tune to that Hz)
-        Left-click in right edge → start dB-scale drag (Phase B.8)
-        Right-click              → emit right_clicked_freq for the
-                                    notch context menu / shift+right
-                                    quick-remove gesture.
+        """Mouse button handler. Priority order:
+          1. Passband-edge drag (Phase B.11) — if cursor is near
+             a passband edge halo
+          2. dB-scale drag (Phase B.8) — if in right-edge zone
+          3. Click-to-tune (Phase B.5) — anywhere else with left
+          4. Right-click context menu (Phase B.6)
         """
         x = int(event.position().x())
         y = int(event.position().y())
         if event.button() == Qt.LeftButton:
-            if self._is_in_db_zone(x):
-                # Start dB-scale drag — store the start state. The
-                # drag becomes "live" via mouseMoveEvent emitting
-                # db_scale_drag.
+            edge = self._passband_edge_at_x(x)
+            if edge is not None:
+                # Start passband-edge drag; suppress click-to-tune.
+                self._drag_pb_edge = edge
+            elif self._is_in_db_zone(x):
                 self._db_drag = (y, self._min_db, self._max_db)
             else:
                 self.clicked_freq.emit(float(self._freq_at_pixel(x)))
@@ -410,29 +498,34 @@ class SpectrumGpuWidget(QOpenGLWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        """While dragging in the right-edge zone, compute a new
-        (min_db, max_db) range based on vertical mouse delta and
-        emit db_scale_drag. Pan mode only — both edges shift
-        together. Range is clamped to [-150, 0] dBFS with at least
-        a 3 dB span (matches the QPainter widget)."""
+        """Live drag dispatch — passband edge OR dB-scale, whichever
+        is currently active."""
+        x = event.position().x()
+        # Passband-edge drag — emit proposed BW
+        if self._drag_pb_edge is not None:
+            proposed = self._proposed_bw_from_drag(x)
+            if proposed is not None:
+                self.passband_edge_drag.emit(proposed)
+            return
+        # dB-scale drag — emit proposed (min, max)
         if self._db_drag is not None:
             start_y, start_min, start_max = self._db_drag
             dy = int(event.position().y()) - start_y
             h = max(1, self.height())
             span = start_max - start_min
-            # Drag UP (negative dy) → raise both edges (intuitive
-            # "lift the dB scale" feel; matches QPainter widget).
             db_delta = -dy * (span / h)
             new_min = start_min + db_delta
             new_max = start_max + db_delta
             new_min = max(-150.0, min(-3.0, new_min))
             new_max = max(new_min + 3.0, min(0.0, new_max))
             self.db_scale_drag.emit(float(new_min), float(new_max))
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             self._db_drag = None
+            self._drag_pb_edge = None
         super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
@@ -681,8 +774,30 @@ class SpectrumGpuWidget(QOpenGLWidget):
         Mirrors the original QPainter SpectrumWidget's paint order
         so the visual feel is identical between backends.
         """
+        self._draw_passband(painter)
         self._draw_noise_floor(painter)
         self._draw_vfo_marker(painter)
+
+    def _draw_passband(self, painter: QPainter) -> None:
+        """Translucent cyan rectangle covering the RX filter
+        passband, with dashed cyan edges. Operator can grab the
+        edges to drag-resize RX BW (handled in mousePressEvent /
+        mouseMoveEvent). Visuals match the QPainter widget."""
+        x_lo, x_hi = self._passband_edge_px()
+        if x_lo is None or x_hi is None:
+            return
+        w = self.width()
+        h = self.height()
+        x_lo = max(0, min(w, x_lo))
+        x_hi = max(0, min(w, x_hi))
+        if x_hi <= x_lo:
+            return
+        fill = QColor(0, 229, 255, 28)    # faint cyan
+        edge = QColor(0, 229, 255, 140)   # brighter cyan for edges
+        painter.fillRect(x_lo, 0, x_hi - x_lo, h, fill)
+        painter.setPen(QPen(edge, 1, Qt.DashLine))
+        painter.drawLine(x_lo, 0, x_lo, h)
+        painter.drawLine(x_hi - 1, 0, x_hi - 1, h)
 
     def _draw_noise_floor(self, painter: QPainter) -> None:
         """Horizontal dashed line at the noise-floor dB level, with
