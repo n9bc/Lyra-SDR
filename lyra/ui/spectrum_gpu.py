@@ -303,6 +303,9 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # in Hz. +pitch in CWU, -pitch in CWL, 0 elsewhere (line
         # hidden). Set via radio.cw_zero_offset_changed → set_cw_zero_offset.
         self._cw_zero_offset_hz: int = 0
+        # Lyra constellation watermark visibility — operator toggle.
+        # Default ON; switched via Settings → Visuals.
+        self._show_constellation: bool = True
 
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
@@ -425,6 +428,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         Connected to radio.cw_zero_offset_changed. +pitch in CWU,
         -pitch in CWL, 0 outside CW (line hidden)."""
         self._cw_zero_offset_hz = int(offset_hz)
+        self.update()
+
+    def set_show_constellation(self, visible: bool) -> None:
+        """Toggle the Lyra constellation watermark behind the trace."""
+        self._show_constellation = bool(visible)
         self.update()
 
     def set_notches(self, notches: list) -> None:
@@ -868,6 +876,13 @@ class SpectrumGpuWidget(QOpenGLWidget):
         Mirrors the original QPainter SpectrumWidget's paint order
         so the visual feel is identical between backends.
         """
+        # Lyra constellation watermark — drawn FIRST so passband,
+        # marker, notches, and labels all sit on top. Edge-faded so
+        # the trace area in the middle of the widget stays clean.
+        # Toggleable per `_show_constellation`.
+        if self._show_constellation:
+            from lyra.ui.constellation import draw as draw_constellation
+            draw_constellation(painter, self.width(), self.height())
         self._draw_passband(painter)
         self._draw_noise_floor(painter)
         self._draw_db_scale_labels(painter)

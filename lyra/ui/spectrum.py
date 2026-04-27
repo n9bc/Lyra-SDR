@@ -88,6 +88,9 @@ class SpectrumWidget(_PaintedWidget):
         # CW Zero (white) reference line offset from the VFO marker,
         # in Hz. +pitch in CWU, -pitch in CWL, 0 elsewhere (line hidden).
         self._cw_zero_offset_hz: int = 0
+        # Lyra constellation watermark visibility — operator toggle.
+        # Default ON; switched via Settings → Visuals.
+        self._show_constellation: bool = True
         self._passband_hi_hz: int = 0
         # Noise-floor reference line. None = hidden; otherwise draw a
         # muted dashed horizontal line at the corresponding y-pixel.
@@ -175,6 +178,11 @@ class SpectrumWidget(_PaintedWidget):
         """CW Zero (white) reference line offset from the VFO marker,
         in Hz. +pitch in CWU, -pitch in CWL, 0 outside CW (hidden)."""
         self._cw_zero_offset_hz = int(offset_hz)
+        self.update()
+
+    def set_show_constellation(self, visible: bool) -> None:
+        """Toggle the Lyra constellation watermark behind the trace."""
+        self._show_constellation = bool(visible)
         self.update()
 
     def set_spectrum_trace_color(self, hex_str: str):
@@ -686,6 +694,14 @@ class SpectrumWidget(_PaintedWidget):
         for i in range(1, 10):
             x = int(w * i / 10)
             p.drawLine(x, 0, x, h)
+
+        # Lyra constellation watermark — drawn after the grid but
+        # before the trace, so the spectrum line dominates visually.
+        # Edge-faded toward the widget center so it stays out of the
+        # trace's way. Toggleable per `_show_constellation`.
+        if getattr(self, "_show_constellation", True):
+            from lyra.ui.constellation import draw as _draw_constellation
+            _draw_constellation(p, w, h)
 
         # ── Band-plan overlay ─────────────────────────────────────
         # Top strip: colored sub-band segments (CW / DIG / SSB / FM)

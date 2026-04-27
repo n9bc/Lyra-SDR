@@ -1166,6 +1166,22 @@ class VisualsSettingsTab(QWidget):
         self.palette_combo.currentTextChanged.connect(
             self.radio.set_waterfall_palette)
         gp.addWidget(self.palette_combo, 0, 1, Qt.AlignLeft)
+
+        # Lyra constellation watermark toggle. Lives in the same
+        # group as the palette since both are panadapter visuals.
+        self.lyra_const_check = QCheckBox(
+            "Show Lyra constellation behind panadapter")
+        self.lyra_const_check.setChecked(
+            bool(self.radio.show_lyra_constellation))
+        self.lyra_const_check.setToolTip(
+            "Subtle stylized Lyra constellation watermark drawn behind "
+            "the spectrum trace. Edge-faded so it stays out of the "
+            "trace area in the middle of the panadapter."
+        )
+        self.lyra_const_check.toggled.connect(
+            self.radio.set_show_lyra_constellation)
+        gp.addWidget(self.lyra_const_check, 1, 0, 1, 2, Qt.AlignLeft)
+
         v.addWidget(grp_pal)
 
         # ── dB ranges (spectrum + waterfall) ──────────────────────

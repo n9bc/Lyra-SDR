@@ -1758,6 +1758,13 @@ class MainWindow(QMainWindow):
         # already explains).
         if s.contains("visuals/waterfall_palette"):
             r.set_waterfall_palette(str(s.value("visuals/waterfall_palette")))
+        if s.contains("visuals/show_lyra_constellation"):
+            v = s.value("visuals/show_lyra_constellation")
+            # QSettings round-trips bools as the string "true"/"false"
+            # on some platforms; normalize.
+            if isinstance(v, str):
+                v = v.lower() in ("1", "true", "yes")
+            r.set_show_lyra_constellation(bool(v))
         # ── Cal-fix migration ──────────────────────────────────────
         # The 0.0.2 release fixed the FFT normalization to be true
         # dBFS — every reading drops by ~34 dB compared to earlier

@@ -139,6 +139,9 @@ class Radio(QObject):
     # apply the change live without the settings dialog knowing which
     # widget instances exist.
     waterfall_palette_changed  = Signal(str)           # palette name
+    # Lyra constellation watermark visibility behind the panadapter
+    # trace. Wired to both spectrum widget backends.
+    lyra_constellation_changed = Signal(bool)
     spectrum_db_range_changed  = Signal(float, float)  # (min_db, max_db)
     spectrum_cal_db_changed    = Signal(float)         # operator cal trim, dB
     smeter_cal_db_changed      = Signal(float)         # S-meter cal trim, dB
@@ -495,6 +498,11 @@ class Radio(QObject):
         # auto-shifted by the SPECTRUM_OLD_SCALE_DB_SHIFT migration
         # in app.py:_load_settings so existing users see continuity.
         self._waterfall_palette = "Classic"
+        # Lyra constellation watermark behind the panadapter trace.
+        # Operator-toggleable in Settings → Visuals; persisted to
+        # QSettings. Default ON since it's part of the Lyra brand
+        # identity. Loaded value (if any) is restored in app.py.
+        self._show_lyra_constellation = True
         self._spectrum_min_db   = -140.0
         self._spectrum_max_db   = -50.0
         # Operator-set BOUNDS for the spectrum range. Auto-scale is
@@ -1980,6 +1988,22 @@ class Radio(QObject):
             return
         self._waterfall_palette = name
         self.waterfall_palette_changed.emit(name)
+
+    @property
+    def show_lyra_constellation(self) -> bool:
+        return self._show_lyra_constellation
+
+    def set_show_lyra_constellation(self, visible: bool) -> None:
+        """Toggle the Lyra constellation watermark behind the panadapter
+        trace. Persisted via QSettings; both spectrum widget backends
+        listen for the change and repaint."""
+        v = bool(visible)
+        if v == self._show_lyra_constellation:
+            return
+        self._show_lyra_constellation = v
+        from PySide6.QtCore import QSettings as _QS
+        _QS("N8SDR", "Lyra").setValue("visuals/show_lyra_constellation", v)
+        self.lyra_constellation_changed.emit(v)
 
     # ── Spectrum cal trim ──────────────────────────────────────────
     # Operator-adjustable per-rig calibration offset (dB) added to
