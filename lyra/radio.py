@@ -149,6 +149,12 @@ class Radio(QObject):
     # RX BW changes so the widget can draw the translucent passband rect.
     passband_changed = Signal(int, int)    # (low_offset_hz, high_offset_hz)
     cw_pitch_changed = Signal(int)         # Hz, operator-set CW tone
+    # CW Zero (white) line offset from the VFO marker, in Hz.
+    # Vertical reference line drawn at the filter center — i.e., where
+    # a clicked CW signal lands and where the audio is generated.
+    # CWU: +pitch (right of marker). CWL: -pitch (left). 0 outside CW
+    # (line hidden). Emitted on mode change and pitch change.
+    cw_zero_offset_changed = Signal(int)
 
     # Panadapter zoom + update rates
     zoom_changed                  = Signal(float)      # 1.0 = full span
@@ -841,6 +847,9 @@ class Radio(QObject):
             self._save_current_band_memory()
         self.mode_changed.emit(alias)
         self._emit_passband()
+        # CW Zero line lives at +/-pitch in CWU/CWL, hidden elsewhere —
+        # re-emit so the panadapter draws or removes the white line.
+        self._emit_cw_zero()
 
     def _compute_passband(self) -> tuple[int, int]:
         """Return (low_hz, high_hz) offsets from the tuned center for
@@ -2570,11 +2579,32 @@ class Radio(QObject):
     def cw_pitch_hz(self) -> int:
         return int(self._cw_pitch_hz)
 
+    @property
+    def cw_zero_offset_hz(self) -> int:
+        """Where to draw the CW Zero (white) reference line, as a Hz
+        offset from the VFO marker. This is the filter center — i.e.,
+        where a clicked CW signal lands in the spectrum and where the
+        audio is generated from.
+
+          CWU: +pitch  (filter / signal sit RIGHT of the marker)
+          CWL: -pitch  (filter / signal sit LEFT of the marker)
+          else: 0      (line is hidden in non-CW modes)
+        """
+        if self._mode == "CWU":
+            return +int(self._cw_pitch_hz)
+        if self._mode == "CWL":
+            return -int(self._cw_pitch_hz)
+        return 0
+
+    def _emit_cw_zero(self) -> None:
+        self.cw_zero_offset_changed.emit(int(self.cw_zero_offset_hz))
+
     def set_cw_pitch_hz(self, pitch: int) -> None:
         """Set the CW pitch tone in Hz (clamped to 200..1500). Updates:
           - The stored value (persisted to QSettings)
           - The CWDemod instances (rebuilt at the new pitch)
           - The passband overlay (re-emit with new offset)
+          - The CW Zero line position (white reference line)
           - The cw_pitch_changed signal for any listeners
         Operator-driven; typical preference range 400-800 Hz."""
         new_pitch = int(max(200, min(1500, int(pitch))))
@@ -2589,6 +2619,7 @@ class Radio(QObject):
         # shifts to the new CW position immediately.
         self._emit_passband()
         self.cw_pitch_changed.emit(new_pitch)
+        self._emit_cw_zero()
 
     # ── AGC threshold (target audio level) ───────────────────────────
     @property

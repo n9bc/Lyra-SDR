@@ -85,6 +85,9 @@ class SpectrumWidget(_PaintedWidget):
         # rect so the operator can see which signals are IN vs OUT of
         # the demod filter. Set by Radio.passband_changed.
         self._passband_lo_hz: int = 0
+        # CW Zero (white) reference line offset from the VFO marker,
+        # in Hz. +pitch in CWU, -pitch in CWL, 0 elsewhere (line hidden).
+        self._cw_zero_offset_hz: int = 0
         self._passband_hi_hz: int = 0
         # Noise-floor reference line. None = hidden; otherwise draw a
         # muted dashed horizontal line at the corresponding y-pixel.
@@ -166,6 +169,12 @@ class SpectrumWidget(_PaintedWidget):
         tuned carrier. Low < High. (0, 0) hides the overlay."""
         self._passband_lo_hz = int(low_hz)
         self._passband_hi_hz = int(high_hz)
+        self.update()
+
+    def set_cw_zero_offset(self, offset_hz: int) -> None:
+        """CW Zero (white) reference line offset from the VFO marker,
+        in Hz. +pitch in CWU, -pitch in CWL, 0 outside CW (hidden)."""
+        self._cw_zero_offset_hz = int(offset_hz)
         self.update()
 
     def set_spectrum_trace_color(self, hex_str: str):
@@ -1003,6 +1012,16 @@ class SpectrumWidget(_PaintedWidget):
         cx = w // 2
         p.setPen(QPen(QColor(255, 170, 80, 220), 1, Qt.DashLine))
         p.drawLine(cx, 0, cx, h)
+
+        # CW Zero (white) reference line — visible only in CW modes.
+        # Sits at +/-pitch from the VFO marker, marking the filter
+        # center where a clicked CW signal lands and is heard.
+        if self._cw_zero_offset_hz and self._span_hz > 0:
+            hz_per_px = self._span_hz / max(1, w)
+            xz = int(round(cx + self._cw_zero_offset_hz / hz_per_px))
+            if 0 <= xz < w:
+                p.setPen(QPen(QColor(255, 255, 255, 220), 1, Qt.SolidLine))
+                p.drawLine(xz, 0, xz, h)
 
         # Notch markers — filled rectangle spanning the
         # notch's -3 dB bandwidth (the actual region the filter

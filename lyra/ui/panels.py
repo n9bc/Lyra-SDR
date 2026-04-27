@@ -2142,6 +2142,10 @@ class SpectrumPanel(GlassPanel):
         pb_lo, pb_hi = self.radio._compute_passband()
         self.widget.set_passband(pb_lo, pb_hi)
         self.radio.passband_changed.connect(self.widget.set_passband)
+        # CW Zero (white) reference line — visible only in CWU/CWL.
+        self.widget.set_cw_zero_offset(int(self.radio.cw_zero_offset_hz))
+        self.radio.cw_zero_offset_changed.connect(
+            self.widget.set_cw_zero_offset)
         # Notch markers (Phase B.13) — seed + track changes.
         self.widget.set_notches(self.radio.notch_details)
         self.radio.notches_changed.connect(self.widget.set_notches)
@@ -2210,6 +2214,9 @@ class SpectrumPanel(GlassPanel):
         pb_lo, pb_hi = radio._compute_passband()
         self.widget.set_passband(pb_lo, pb_hi)
         radio.passband_changed.connect(self.widget.set_passband)
+        # CW Zero (white) reference line — visible only in CWU/CWL.
+        self.widget.set_cw_zero_offset(int(radio.cw_zero_offset_hz))
+        radio.cw_zero_offset_changed.connect(self.widget.set_cw_zero_offset)
         # Drag-to-resize: user grabs a cyan edge and drags → widget
         # emits the proposed BW (already clamped + quantized) → we
         # push it straight into Radio.set_rx_bw for the current mode.

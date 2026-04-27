@@ -299,6 +299,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Active passband-edge drag — None or "lo" / "hi".
         self._drag_pb_edge: Optional[str] = None
 
+        # CW Zero (white) reference line offset from the VFO marker,
+        # in Hz. +pitch in CWU, -pitch in CWL, 0 elsewhere (line
+        # hidden). Set via radio.cw_zero_offset_changed → set_cw_zero_offset.
+        self._cw_zero_offset_hz: int = 0
+
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
         # radio.notches_changed via the panel.
@@ -413,6 +418,13 @@ class SpectrumGpuWidget(QOpenGLWidget):
         overlay rectangle on the next paint."""
         self._passband_lo_hz = float(lo_hz)
         self._passband_hi_hz = float(hi_hz)
+        self.update()
+
+    def set_cw_zero_offset(self, offset_hz: int) -> None:
+        """CW Zero (white) reference line offset from the VFO marker.
+        Connected to radio.cw_zero_offset_changed. +pitch in CWU,
+        -pitch in CWL, 0 outside CW (line hidden)."""
+        self._cw_zero_offset_hz = int(offset_hz)
         self.update()
 
     def set_notches(self, notches: list) -> None:
@@ -860,6 +872,10 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._draw_noise_floor(painter)
         self._draw_db_scale_labels(painter)
         self._draw_vfo_marker(painter)
+        # CW Zero line drawn AFTER the VFO marker so the white line
+        # sits on top — operators read the marker→white-line gap as
+        # the audible pitch position.
+        self._draw_cw_zero_line(painter)
         self._draw_notches(painter)
         self._draw_freq_scale_labels(painter)
 
@@ -1040,6 +1056,22 @@ class SpectrumGpuWidget(QOpenGLWidget):
         cx = self.width() // 2
         painter.setPen(QPen(QColor(255, 170, 80, 220), 1, Qt.DashLine))
         painter.drawLine(cx, 0, cx, self.height())
+
+    def _draw_cw_zero_line(self, painter: QPainter) -> None:
+        """White vertical line at +/-pitch from the VFO marker —
+        marks the CW filter center and the position where a clicked
+        CW signal lands and is heard. Hidden in non-CW modes."""
+        if not self._cw_zero_offset_hz or self._span_hz <= 0:
+            return
+        hz_per_px = self._span_hz / max(1, self.width())
+        cx = self.width() // 2
+        x = int(round(cx + self._cw_zero_offset_hz / hz_per_px))
+        if x < 0 or x >= self.width():
+            return
+        # Solid white line, slightly translucent so it doesn't fully
+        # obscure the signal under it.
+        painter.setPen(QPen(QColor(255, 255, 255, 220), 1, Qt.SolidLine))
+        painter.drawLine(x, 0, x, self.height())
 
     # ── GL teardown ────────────────────────────────────────────────
     def _cleanup_gl_resources(self) -> None:
