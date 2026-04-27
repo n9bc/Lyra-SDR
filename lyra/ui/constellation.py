@@ -25,21 +25,24 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 
 
-# Star positions in normalized widget coordinates [(0..1, 0..1)].
-# Sky-up orientation: Vega top, parallelogram bottom. Tuned for a
-# wide-aspect panadapter — the constellation occupies the central
-# vertical band of the widget.
+# Star positions in normalized constellation-cell coordinates
+# [(0..1, 0..1)]. Sky-up orientation: Vega top, parallelogram bottom.
+# The triangle (Vega + ε + ζ) is intentionally COMPACT and the
+# parallelogram (β / δ / γ) is intentionally WIDER than the triangle
+# — that's the proper Lyra silhouette and makes the shape readable
+# at a glance on the panadapter (vs. collapsing to a thin kite when
+# the two are similar widths).
 #
 # Tuple layout: (name, nx, ny, base_brightness)
-#   nx, ny  : 0..1 normalized position
+#   nx, ny  : 0..1 normalized position within the constellation cell
 #   base    : 0..1 brightness multiplier (Vega = 1.0, dimmer stars < 1)
 LYRA_STARS = [
-    ("Vega",  0.50, 0.10, 1.00),  # α Lyr — brightest, gets the pulse
-    ("eps",   0.36, 0.30, 0.55),  # ε Lyr (Double Double)
-    ("zet",   0.62, 0.30, 0.55),  # ζ Lyr
-    ("bet",   0.30, 0.62, 0.55),  # β Lyr (Sheliak)
-    ("del",   0.66, 0.62, 0.50),  # δ Lyr
-    ("gam",   0.50, 0.92, 0.55),  # γ Lyr (Sulafat)
+    ("Vega",  0.50, 0.05, 1.00),  # α Lyr — brightest, gets the pulse
+    ("eps",   0.42, 0.28, 0.55),  # ε Lyr (Double Double) — close to Vega
+    ("zet",   0.58, 0.28, 0.55),  # ζ Lyr — close to Vega
+    ("bet",   0.18, 0.62, 0.55),  # β Lyr (Sheliak) — wide-left of parallelogram
+    ("del",   0.82, 0.62, 0.50),  # δ Lyr — wide-right of parallelogram
+    ("gam",   0.50, 0.95, 0.55),  # γ Lyr (Sulafat) — bottom apex
 ]
 LYRA_STARS_BY_NAME = {s[0]: s for s in LYRA_STARS}
 
@@ -114,20 +117,22 @@ def draw(painter: QPainter, w: int, h: int) -> None:
         return
 
     # Pre-compute pixel positions + edge-fade for each star.
-    # The constellation cell is sized to nearly the full widget height
-    # (panadapter is much wider than tall, so this still leaves plenty
-    # of horizontal headroom for the wider edge-fade region to show).
-    # Vega ends up near the top, the parallelogram near the bottom,
-    # and the stars span enough vertical distance that the edge-fade
-    # falloff actually reaches its corner-bright value at top/bottom.
-    cell = min(int(h * 0.92), int(w * 0.55))
+    #
+    # Width and height are scaled independently so the constellation
+    # can stretch horizontally on a wide panadapter without becoming
+    # a tall skinny kite. The vertical extent fills nearly the full
+    # widget height; the horizontal extent is roughly 60% of the
+    # widget width (capped to ~2x the height so the shape doesn't
+    # become unrecognizably squashed on extremely wide displays).
+    cell_h = int(h * 0.92)
+    cell_w = min(int(w * 0.60), int(cell_h * 2.0))
     cx = w // 2
     cy = int(h * 0.50)
     star_px: dict[str, tuple[int, int, float, float]] = {}
     for name, nx, ny, base in LYRA_STARS:
-        # Map (0..1, 0..1) within `cell` centered on (cx, cy).
-        x = cx + int((nx - 0.5) * cell)
-        y = cy + int((ny - 0.5) * cell)
+        # Map (0..1, 0..1) within (cell_w, cell_h) centered on (cx, cy).
+        x = cx + int((nx - 0.5) * cell_w)
+        y = cy + int((ny - 0.5) * cell_h)
         # Edge-fade is computed in widget-normalized coords so a star
         # near the widget edge gets full alpha regardless of where it
         # lives inside the constellation cell.
