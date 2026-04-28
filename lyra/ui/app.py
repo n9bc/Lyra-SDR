@@ -1825,7 +1825,14 @@ class MainWindow(QMainWindow):
             wf_range = _migrate_range(
                 "visuals/waterfall_min_db", "visuals/waterfall_max_db")
             if wf_range is not None:
-                r.set_waterfall_db_range(*wf_range)
+                # Same too-narrow guard the spectrum range gets — a
+                # previously saved pinched waterfall range would cause
+                # the heatmap to render mostly one solid color until
+                # auto-scale catches up. Fall back to defaults if the
+                # saved span is < 30 dB.
+                _wlo, _whi = wf_range
+                if _whi - _wlo >= 30.0:
+                    r.set_waterfall_db_range(_wlo, _whi)
             if s.contains("visuals/spectrum_cal_db"):
                 r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
             if s.contains("visuals/smeter_cal_db"):

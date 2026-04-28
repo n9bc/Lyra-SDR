@@ -2910,6 +2910,14 @@ class Radio(QObject):
                 # live display range, NOT the user bounds.
                 self.set_spectrum_db_range(
                     target_lo, target_hi, from_user=False)
+                # Mirror the same range to the waterfall so its
+                # heatmap fits the band's actual dynamic range too.
+                # Without this the waterfall stays at its default
+                # (-140..-60) regardless of band — operators had to
+                # manually slide its min/max in Settings to see any
+                # color on a band where signals don't naturally fill
+                # that window.
+                self.set_waterfall_db_range(target_lo, target_hi)
         elif self._auto_scale_peak_history:
             # Auto turned off — drop the history so it doesn't grow
             # unbounded if the operator never re-enables.
@@ -2932,9 +2940,38 @@ class Radio(QObject):
 
         # Waterfall fires on its own cadence (1 row per N FFT ticks)
         # and can burst M rows per push for fast-scroll mode.
+        #
+        # Multi-row push: if waterfall_multiplier > 1 we used to emit
+        # the SAME spec_out M times, which produced visible vertical
+        # blockiness — each group of M identical rows rendered as a
+        # solid stripe. Now we LINEARLY INTERPOLATE between the
+        # previous emitted spectrum and the current one, so the M
+        # rows form a smooth gradient. Looks like real fast-scroll
+        # at the same CPU cost.
         self._waterfall_tick_counter += 1
         if self._waterfall_tick_counter >= self._waterfall_divider:
             self._waterfall_tick_counter = 0
-            for _ in range(self._waterfall_multiplier):
-                self.waterfall_ready.emit(
-                    spec_out, float(self._freq_hz), eff_rate)
+            mult = self._waterfall_multiplier
+            prev = getattr(self, "_wf_prev_spec", None)
+            if mult <= 1 or prev is None or prev.shape != spec_out.shape:
+                # Cold path / first frame after rate change: just emit
+                # the current spectrum once (mult==1) or M times (no
+                # previous frame to interp from yet).
+                for _ in range(mult):
+                    self.waterfall_ready.emit(
+                        spec_out, float(self._freq_hz), eff_rate)
+            else:
+                # Hot path: emit M interpolated frames spanning
+                # prev → spec_out. The kth (1-based) frame is
+                # prev*(1 - k/M) + spec_out*(k/M), so the LAST
+                # frame is the actual current spectrum and the
+                # earlier frames bridge the gap from prev.
+                for k in range(1, mult + 1):
+                    t = k / mult
+                    frame = (prev * (1.0 - t) + spec_out * t).astype(
+                        spec_out.dtype, copy=False)
+                    self.waterfall_ready.emit(
+                        frame, float(self._freq_hz), eff_rate)
+            # Snapshot for next tick's interpolation. Use a copy so
+            # the consumer side doesn't see future mutations.
+            self._wf_prev_spec = np.array(spec_out, copy=True)
