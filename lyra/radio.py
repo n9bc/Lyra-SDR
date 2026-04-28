@@ -633,10 +633,22 @@ class Radio(QObject):
         # to the spectrum display itself. This lets the operator
         # calibrate the S-meter against a known reference (e.g. a
         # signal generator at -73 dBm = S9) without re-shifting the
-        # whole panadapter scale. Default 0; settable via Settings →
-        # Visuals → "S-meter cal" or by right-click on the meter →
+        # whole panadapter scale. Settable via Settings → Visuals →
+        # "S-meter cal" or by right-click on the meter →
         # "Calibrate to current = …".
-        self._smeter_cal_db = 0.0
+        #
+        # Default +21.0 dB: empirically derived on N8SDR's HL2+
+        # against Thetis 2.10.3.13 with WWV @ 10 MHz AM 8K and 40 m
+        # noise floor as references. Math chain:
+        #   - HL2 IQ stream is dBFS relative to ADC full-scale
+        #   - Lyra integrates passband power (np.sum of linear bins)
+        #   - +21 dB shifts the result onto a typical dBm scale that
+        #     reads within ~3 dB of Thetis on the same antenna
+        # Operators on different rigs/antennas/RF environments can
+        # nudge this via the right-click "Calibrate to specific dBm"
+        # option; their value is saved in QSettings and overrides
+        # this default on subsequent launches.
+        self._smeter_cal_db = 21.0
 
         # S-meter response mode — "peak" (default, instant max bin in
         # the passband) or "avg" (time-smoothed mean of passband bins,
