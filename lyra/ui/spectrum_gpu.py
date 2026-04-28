@@ -1195,31 +1195,39 @@ class SpectrumGpuWidget(QOpenGLWidget):
             gc = (argb >> 8) & 0xFF
             bc = argb & 0xFF
             border_alpha = int(round(255 * alpha_mul))
-            tint_alpha = int(round(45 * alpha_mul))
             text_alpha = int(round(255 * alpha_mul))
             spot_color = QColor(rc, gc, bc, border_alpha)
-            tint = QColor(rc, gc, bc, tint_alpha)
+            # Dark semi-opaque fill — gives max contrast to white text
+            # inside while letting the colored border still identify
+            # the spot type by hue. Field test on 20 m showed that
+            # spot-color text + spot-color tint fill blended into a
+            # gauzy outline that operators couldn't read on a busy
+            # band. White-text-on-dark-fill is the standard cluster-
+            # display treatment (DXLab, N1MM+, SpotCollector all do
+            # something similar) and stays legible at any age-fade
+            # level.
+            fill_alpha = int(round(200 * alpha_mul))
+            dark_fill = QColor(20, 22, 28, fill_alpha)
             text = s.get("display") or s.get("call", "")
             rect = QRectF(bx, by, tw, box_h)
-            painter.setBrush(tint)
+            painter.setBrush(dark_fill)
             painter.setPen(QPen(spot_color, 1))
             painter.drawRoundedRect(rect, 3, 3)
-            # Drop shadow — 1 px black offset below the text so the
-            # spot-color text stays legible regardless of how bright
-            # or dim the foreground color ends up after age-fade.
-            # Cheap (one extra drawText) and matches the over-trace
-            # text treatment in commercial SDR clients.
+            # White text with a 1 px black drop shadow for that final
+            # bit of pop on bright backgrounds (e.g. when the spot
+            # box overlaps a bright trace peak).
             shadow_rect = QRectF(bx + 1, by + 1, tw, box_h)
-            painter.setPen(QPen(QColor(0, 0, 0, max(120, text_alpha)),
+            painter.setPen(QPen(QColor(0, 0, 0, max(180, text_alpha)),
                                 1))
             painter.drawText(shadow_rect, Qt.AlignCenter, text)
-            painter.setPen(QPen(QColor(rc, gc, bc, text_alpha), 1))
+            painter.setPen(QPen(QColor(255, 255, 255, text_alpha), 1))
             painter.drawText(rect, Qt.AlignCenter, text)
-            # Vertical tick from box bottom down toward the trace
-            tick_pen = QPen(QColor(rc, gc, bc,
-                                   max(80, border_alpha)), 1)
-            painter.setPen(tick_pen)
-            painter.drawLine(nx, int(by + box_h), nx, h - 18)
+            # NOTE: no vertical drop line from the box to the trace —
+            # the box's horizontal position already encodes the spot
+            # frequency, and the line was visually noisy on busy
+            # bands. Standard SDR-client convention is positional-
+            # only labels (TCI's spot: protocol carries no tick info
+            # either; rendering choices are entirely on the client).
 
     def _draw_freq_scale_labels(self, painter: QPainter) -> None:
         """Frequency tick labels at the BOTTOM — kHz with one
