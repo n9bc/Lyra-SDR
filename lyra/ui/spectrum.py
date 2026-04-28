@@ -1148,9 +1148,10 @@ class SpectrumWidget(_PaintedWidget):
             ROW_GAP_PX    = 3      # horizontal padding between same-row boxes
             AGE_FADE_FLOOR = 0.30  # min alpha multiplier for very old spots
 
-            # Dedicated font with emoji fallback so flag glyphs render.
-            spot_font = QFont()
-            spot_font.setFamilies(["Segoe UI Emoji", "Segoe UI", "Arial"])
+            # Inherit the widget's current font (loaded by the theme)
+            # so we don't risk nominating a family Qt can't actually
+            # load. Just bump the size + bold for over-trace legibility.
+            spot_font = QFont(p.font())
             spot_font.setPointSize(8)
             spot_font.setBold(True)
             p.setFont(spot_font)

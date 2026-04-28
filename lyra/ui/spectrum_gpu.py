@@ -1122,14 +1122,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         MAX_SPOT_ROWS = 4
         ROW_GAP_PX = 3
         AGE_FADE_FLOOR = 0.30
-        # Dedicated font with emoji fallback so flag glyphs render.
-        # Bumped to 10 pt (vs 8 pt on the QPainter widget) because
-        # Qt fonts rendered through QPainter on top of QOpenGLWidget
-        # come out noticeably thinner than over a plain QWidget —
-        # 8 pt was unreadable in field test. Same 9-pt-bumped
-        # workaround used in _draw_db_scale_labels.
-        spot_font = QFont()
-        spot_font.setFamilies(["Segoe UI Emoji", "Segoe UI", "Arial"])
+        # Dedicated font for spot callsigns. Use the widget's
+        # current font as the base (whatever the app theme selects)
+        # so we inherit a known-loadable family rather than
+        # nominating one that may or may not exist. Just bump the
+        # size + bold for legibility over the trace. 10 pt matches
+        # the bumped size used in the dB scale labels (9 pt on a
+        # QOpenGLWidget surface renders thin).
+        spot_font = QFont(painter.font())
         spot_font.setPointSize(10)
         spot_font.setBold(True)
         painter.setFont(spot_font)
