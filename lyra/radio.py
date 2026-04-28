@@ -207,12 +207,27 @@ class Radio(QObject):
     # "auto" uses a medium release/hang and additionally tracks the noise
     # floor continuously (auto_set_agc_threshold every AGC_AUTO_INTERVAL_MS)
     # so the threshold follows band conditions without user intervention.
+    # AGC release coefficient is applied per audio block (~43 ms at
+    # 48 kHz / 2048 samples). Time constant τ for peak decay is
+    # τ ≈ -43 ms / ln(1 - release). Values calibrated against
+    # Thetis 2.10.3.13 (WDSP wcpAGC) reference profiles:
+    #   Thetis FAST:  hang  0 ms, decay  50 ms
+    #   Thetis MED :  hang  0 ms, decay 250 ms
+    #   Thetis SLOW:  hang 1000 ms, decay 500 ms
+    # The original Lyra values had release coefficients ~20-30×
+    # too slow (Fast τ was 2.1 s, Slow τ was 43 s), which made
+    # audio stay clamped for many seconds after a peak — exact
+    # symptom: "audio doesn't come back up to audible after a
+    # strong signal." Hang on Fast/Med is now ZERO (matches
+    # Thetis); recovery starts on the very first block after
+    # the peak passes. Slow keeps a 1 s hang for steady-carrier
+    # listening (AM broadcast, DX nets).
     AGC_PRESETS: dict[str, dict] = {
-        "off":    {"release": 0.0,   "hang_blocks": 0},   # disabled
-        "fast":   {"release": 0.020, "hang_blocks": 3},
-        "med":    {"release": 0.005, "hang_blocks": 12},
-        "slow":   {"release": 0.001, "hang_blocks": 46},
-        "auto":   {"release": 0.005, "hang_blocks": 12},  # med + track
+        "off":    {"release": 0.0,   "hang_blocks":  0},   # disabled
+        "fast":   {"release": 0.576, "hang_blocks":  0},   # τ≈ 50 ms
+        "med":    {"release": 0.158, "hang_blocks":  0},   # τ≈250 ms
+        "slow":   {"release": 0.083, "hang_blocks": 23},   # τ≈500 ms, hang 1 s
+        "auto":   {"release": 0.158, "hang_blocks":  0},   # med + track
     }
     AGC_AUTO_INTERVAL_MS = 3000   # re-track threshold every 3 s in auto mode
 

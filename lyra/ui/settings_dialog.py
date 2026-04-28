@@ -690,9 +690,9 @@ class DspSettingsTab(QWidget):
     # Description + ordering for the AGC profile radio buttons.
     AGC_PROFILE_UI = [
         ("off",    "Off",     "No AGC — volume scales raw demod output"),
-        ("fast",   "Fast",    "~150 ms hang, quick release — CW and weak signals"),
-        ("med",    "Medium",  "~500 ms hang — general SSB / ragchew (default)"),
-        ("slow",   "Slow",    "~2 s hang — DX nets, steady AM broadcast"),
+        ("fast",   "Fast",    "0 hang, ~50 ms decay — CW and weak signals"),
+        ("med",    "Medium",  "0 hang, ~250 ms decay — general SSB / ragchew (default)"),
+        ("slow",   "Slow",    "~1 s hang, ~500 ms decay — DX nets, AM broadcast"),
         ("auto",   "Auto",    "Medium release + threshold auto-tracks noise floor every 3 s"),
         ("custom", "Custom",  "User-defined release and hang values"),
     ]
