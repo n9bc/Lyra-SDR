@@ -769,28 +769,24 @@ class DspSettingsTab(QWidget):
 
         v.addWidget(grp_agc)
 
-        # ── CW pitch ─────────────────────────────────────────────────
-        # Operator-adjustable tone for CW reception. Drives the
-        # CWDemod offset, the panadapter passband overlay position,
-        # and the click-to-tune CW correction so all three stay in
-        # sync. Persisted via QSettings (radio handles save).
+        # ── CW ───────────────────────────────────────────────────────
+        # Home for all CW operator settings. Today it's just pitch
+        # (drives CWDemod offset, panadapter passband overlay
+        # position, and click-to-tune CW correction). APF (audio
+        # peaking filter) and BIN (binaural CW) settings will land
+        # here next. Persisted via QSettings (radio handles save).
         #
-        # FUTURE-MOVE NOTE: when TX lands, CW transmission needs
-        # additional operator settings — break-in mode (semi / full
-        # BK / off), keying speed (WPM), weight (dot:dash ratio),
-        # sidetone level, paddle reverse, possibly memory/macro
-        # buffers. At that point this single "CW pitch" group should
-        # graduate into either:
-        #   (a) A dedicated "CW" tab alongside Radio / Network / DSP
-        #       / Audio / Visuals / Keyer / Bands, OR
-        #   (b) A "CW" subsection added to the Keyer tab (which is
-        #       already CW-adjacent for paddle / iambic config),
-        #       OR
-        #   (c) Stay-in-place with the rest of CW grouped here on
-        #       the DSP tab if the additional controls are few.
-        # Pick the right home when TX scope is clearer. For now,
-        # DSP tab is fine since pitch is a pure RX-side concern.
-        grp_cw = QGroupBox("CW pitch")
+        # FUTURE-MOVE NOTE: when TX lands, CW transmission adds
+        # break-in mode (semi / full BK / off), keying speed (WPM),
+        # weight (dot:dash ratio), sidetone level, paddle reverse,
+        # and possibly memory/macro buffers. At that point this
+        # group may graduate into a dedicated "CW" tab alongside
+        # Radio / Network / DSP / Audio / Visuals / Keyer / Bands,
+        # or merge into the Keyer tab. Pick the right home when TX
+        # scope is clearer. For now, the DSP tab is the natural
+        # home — CW RX is pure DSP and APF/BIN/pitch are all DSP
+        # settings.
+        grp_cw = QGroupBox("CW")
         gc = QGridLayout(grp_cw)
         gc.addWidget(QLabel("Pitch (Hz):"), 0, 0)
         from PySide6.QtWidgets import QSpinBox
