@@ -453,10 +453,15 @@ class Radio(QObject):
         self._agc_auto_timer.setInterval(self.AGC_AUTO_INTERVAL_MS)
         self._agc_auto_timer.timeout.connect(self.auto_set_agc_threshold)
 
-        # Auto-LNA control loop — slow cadence (1.5 s) so we don't
-        # chase transient peaks. Only ticks when lna_auto is True.
+        # Auto-LNA control loop — 500 ms cadence. Originally 1.5 s,
+        # bumped down to make pull-up feel responsive when tuning to
+        # a weak signal at low LNA. Streak gate (multiple consecutive
+        # ticks of "quiet") still filters transients so back-off
+        # doesn't get jumpy. With 500 ms / FAR-tier 1-tick / +2 dB
+        # step, a -6 → +15 climb is ~12 s instead of the original
+        # ~40 s.
         self._lna_auto_timer = _QTimer(self)
-        self._lna_auto_timer.setInterval(1500)
+        self._lna_auto_timer.setInterval(500)
         self._lna_auto_timer.timeout.connect(self._adjust_lna_auto)
 
         # ADC peak reporter — emits lna_peak_dbfs at ~4 Hz so the UI
@@ -664,18 +669,24 @@ class Radio(QObject):
         # "S-meter cal" or by right-click on the meter →
         # "Calibrate to current = …".
         #
-        # Default +21.0 dB: empirically derived on N8SDR's HL2+
+        # Default +28.0 dB: empirically derived on N8SDR's HL2+
         # against Thetis 2.10.3.13 with WWV @ 10 MHz AM 8K and 40 m
         # noise floor as references. Math chain:
         #   - HL2 IQ stream is dBFS relative to ADC full-scale
         #   - Lyra integrates passband power (np.sum of linear bins)
-        #   - +21 dB shifts the result onto a typical dBm scale that
-        #     reads within ~3 dB of Thetis on the same antenna
+        #   - LNA-invariant: meter formula subtracts current
+        #     self._gain_db so reading reflects antenna dBm, not
+        #     ADC-port dBm. Calibrate once, holds across LNA moves.
+        #   - +28 dB shifts the result onto a typical dBm scale.
+        #     Came from +21 (pre-LNA-invariant cal at LNA=+7) plus
+        #     7 (the LNA value at cal time) — the +7 used to be
+        #     baked into the reading by the LNA-dependent old
+        #     formula and now has to live in the cal constant.
         # Operators on different rigs/antennas/RF environments can
         # nudge this via the right-click "Calibrate to specific dBm"
         # option; their value is saved in QSettings and overrides
         # this default on subsequent launches.
-        self._smeter_cal_db = 21.0
+        self._smeter_cal_db = 28.0
 
         # S-meter response mode — "peak" (default, instant max bin in
         # the passband) or "avg" (time-smoothed mean of passband bins,
@@ -985,9 +996,23 @@ class Radio(QObject):
     # AD9866 PGA toward its compression knee — producing AGC pumping
     # / pulsing-spectrum / chopped audio.
     LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB = 10.0
-    # Sustained-quiet streak in ticks (1.5 s each). 5 ticks ≈ 7.5 s
-    # — long enough to ride out gaps between QSOs without climbing.
-    LNA_AUTO_PULLUP_QUIET_TICKS = 5
+    # Sustained-quiet streak in ticks (500 ms each). Tiered by
+    # distance from the active ceiling so the climb feels responsive
+    # when starting from low LNA but still careful in the last
+    # few dB before the ceiling:
+    #   FAR    — more than NEAR_BAND_DB below ceiling → 1 tick
+    #            (500 ms), +2 dB step (rapid climb to bring weak
+    #            signals up)
+    #   NEAR   — within NEAR_BAND_DB of ceiling → 2 ticks (1 s),
+    #            +1 dB step (gentle approach to avoid overshoot)
+    # Total -6 → +15 climb under signal-in-passband conditions:
+    # ~7 FAR jumps × 0.5 s + ~8 NEAR jumps × 1 s = ~12 s.
+    LNA_AUTO_PULLUP_FAR_TICKS  = 1
+    LNA_AUTO_PULLUP_FAR_STEP   = 2
+    LNA_AUTO_PULLUP_NEAR_TICKS = 2
+    LNA_AUTO_PULLUP_NEAR_STEP  = 1
+    # Distance from the active ceiling that switches FAR → NEAR.
+    LNA_AUTO_PULLUP_NEAR_BAND_DB = 8
     # Ceiling for AUTO climb. User can still manually go higher.
     # Set well below LNA_MAX_DB and below the +44 dB IMD zone the
     # v1 auto-chase reached. Loop is also self-limiting: as gain
@@ -1701,13 +1726,28 @@ class Radio(QObject):
         if rms_max_dbfs >= self.LNA_AUTO_QUIET_RMS_DBFS:
             self._lna_pullup_quiet_streak = 0
             return 0, ""
+        # Tiered cadence: FAR from ceiling → fewer ticks, bigger step
+        # so weak-signal climbs feel responsive. NEAR ceiling → more
+        # ticks, smaller step to avoid overshoot. The active ceiling
+        # is 'ceiling' (set above based on signal-in-passband).
+        gap_to_ceiling = ceiling - self._gain_db
+        if gap_to_ceiling > self.LNA_AUTO_PULLUP_NEAR_BAND_DB:
+            need_ticks = self.LNA_AUTO_PULLUP_FAR_TICKS
+            step_db   = self.LNA_AUTO_PULLUP_FAR_STEP
+        else:
+            need_ticks = self.LNA_AUTO_PULLUP_NEAR_TICKS
+            step_db   = self.LNA_AUTO_PULLUP_NEAR_STEP
         # All gates passed for this tick — accumulate streak
         self._lna_pullup_quiet_streak += 1
-        if self._lna_pullup_quiet_streak < self.LNA_AUTO_PULLUP_QUIET_TICKS:
+        if self._lna_pullup_quiet_streak < need_ticks:
             return 0, ""
-        # Streak satisfied — climb 1 dB. Streak reset happens after
-        # the gain change in the caller.
-        return +1, "pull-up (band quiet)"
+        # Streak satisfied — clamp step so we don't overshoot the
+        # ceiling on a FAR-tier +2 dB jump.
+        step_db = min(step_db, max(0, gap_to_ceiling))
+        if step_db <= 0:
+            return 0, ""
+        # Streak reset happens after the gain change in the caller.
+        return step_db, "pull-up (band quiet)"
 
     def set_rx_bw(self, mode: str, bw: int):
         self._rx_bw_by_mode[mode] = int(bw)
@@ -3076,6 +3116,17 @@ class Radio(QObject):
             # within one FFT (~150 ms) rather than waiting for
             # smeter EWMA to catch up.
             self._lna_passband_peak_dbfs = float(np.max(band))
+            # LNA-invariant S-meter: subtract the current LNA gain
+            # from the dBFS reading so the displayed dBm reflects the
+            # signal level AT THE ANTENNA, not at the ADC. Without
+            # this, moving the LNA slider changes the meter reading
+            # one-for-one even though no signal at the antenna has
+            # changed. Matches the standard SDR-client convention
+            # (Thetis, SDR# etc.) — calibrate once, the meter holds
+            # across LNA changes. The +21 dB default cal in
+            # _smeter_cal_db was originally tuned at LNA=+7, so
+            # post-this-change the equivalent is +28 dB; new default
+            # bumped accordingly.
             if self._smeter_mode == "avg":
                 if self._smeter_avg_lin <= 0.0:
                     self._smeter_avg_lin = total_lin
@@ -3083,10 +3134,12 @@ class Radio(QObject):
                     self._smeter_avg_lin = (0.80 * self._smeter_avg_lin
                                             + 0.20 * total_lin)
                 level_db = (10.0 * float(np.log10(max(self._smeter_avg_lin, 1e-20)))
-                            + self._smeter_cal_db)
+                            + self._smeter_cal_db
+                            - float(self._gain_db))
             else:  # "peak" — instantaneous integrated power
                 level_db = (10.0 * float(np.log10(max(total_lin, 1e-20)))
-                            + self._smeter_cal_db)
+                            + self._smeter_cal_db
+                            - float(self._gain_db))
             self.smeter_level.emit(level_db)
 
         # Noise-floor estimate — 20th percentile rejects the upper 80%

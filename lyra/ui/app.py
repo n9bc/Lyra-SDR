@@ -1957,8 +1957,18 @@ class MainWindow(QMainWindow):
                     r.set_waterfall_db_range(_wlo, _whi)
             if s.contains("visuals/spectrum_cal_db"):
                 r.set_spectrum_cal_db(float(s.value("visuals/spectrum_cal_db")))
-            if s.contains("visuals/smeter_cal_db"):
-                r.set_smeter_cal_db(float(s.value("visuals/smeter_cal_db")))
+            # NOTE: key bumped to _v2 when the S-meter became
+            # LNA-invariant (the formula now subtracts current LNA
+            # from the dBm display, so old cal values from the
+            # LNA-dependent era would be off by whatever the LNA
+            # was at calibration time). The v2 default of +28 dB
+            # gives the same reading at LNA=+7 that the v1 default
+            # of +21 dB did, so users who calibrated near +7 LNA
+            # see no change; any other prior cal needs a one-time
+            # re-cal via right-click → "Calibrate to specific dBm".
+            if s.contains("visuals/smeter_cal_db_v2"):
+                r.set_smeter_cal_db(
+                    float(s.value("visuals/smeter_cal_db_v2")))
             if s.contains("smeter_mode"):
                 r.set_smeter_mode(str(s.value("smeter_mode")))
             if s.contains("visuals/zoom"):
@@ -2115,7 +2125,7 @@ class MainWindow(QMainWindow):
         s.setValue("visuals/waterfall_max_db", wf_hi)
         s.setValue("visuals/zoom",              r.zoom)
         s.setValue("visuals/spectrum_cal_db",   r.spectrum_cal_db)
-        s.setValue("visuals/smeter_cal_db",     r.smeter_cal_db)
+        s.setValue("visuals/smeter_cal_db_v2",  r.smeter_cal_db)
         s.setValue("smeter_mode",               r.smeter_mode)
         s.setValue("visuals/spectrum_fps",      r.spectrum_fps)
         s.setValue("visuals/waterfall_divider",   r.waterfall_divider)
