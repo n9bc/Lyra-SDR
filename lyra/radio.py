@@ -310,7 +310,17 @@ class Radio(QObject):
         #     perceptual-curve slider 0..100%. Ride this for moment-
         #     to-moment loudness comfort.
         # Chain: demod → AGC (if on) → AF Gain → Volume → tanh → sink
-        self._af_gain_db = 0                    # integer dB, 0..+50
+        # Default +25 dB: with AGC OFF (digital-mode operating, or
+        # operator preference), AF Gain is the ONLY source of
+        # makeup gain — AGC's 30-60 dB of automatic amplification
+        # is not contributing. Default 0 left fresh installs
+        # silent on AGC-off until the operator discovered the AF
+        # Gain slider, which is operator-hostile. +25 dB lands
+        # most antennas in the audible zone with the Volume slider
+        # at 80% and AGC off; AGC-on path is unaffected (AGC
+        # normalizes to target regardless of pre-AGC gain). Saved
+        # QSettings values still override on subsequent launches.
+        self._af_gain_db = 25                   # integer dB, 0..+50
         # Stereo balance / pan for RX1.
         # Range: -1.0 (full left) .. 0.0 (center) .. +1.0 (full right)
         #
