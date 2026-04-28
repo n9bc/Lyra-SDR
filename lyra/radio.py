@@ -14,7 +14,7 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, List, Optional
 
 import numpy as np
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -461,6 +461,13 @@ class Radio(QObject):
         # the correct DDC slot (DDC2 for ORION2, DDC0 for Hermes-class).
         # None = not yet discovered / manual IP entry.
         self._board_id: Optional[int] = None
+
+        # When discover_all() returns more than one radio (e.g. an HL2 +
+        # an ANAN-G2 on the same LAN), the UI installs a chooser here
+        # via `set_radio_chooser` to pop a Qt picker dialog. The default
+        # preserves the historical behavior of auto-connecting to the
+        # first hit, which is what every single-radio user expects.
+        self._radio_chooser: Callable[[List[object]], object] = lambda lst: lst[0]
 
         # ── Runtime ───────────────────────────────────────────────────
         # Either HL2Stream (P1) or P2Stream (Apache P2). Both expose
@@ -2916,12 +2923,25 @@ class Radio(QObject):
         self._lna_rms = []
         self.stream_state_changed.emit(False)
 
+    def set_radio_chooser(self, chooser: Callable[[list], object]) -> None:
+        """Install a multi-radio picker. Called by `discover()` when more
+        than one radio replied. ``chooser(radios)`` must return one of
+        the elements (or ``None`` to abort the connection)."""
+        self._radio_chooser = chooser
+
     def discover(self):
-        """Broadcast P1 + P2 discovery and pick the first radio that replied.
+        """Broadcast P1 + P2 discovery and pick a radio.
 
         Sets `self._protocol` to "P1" or "P2" so the next start() routes
         through the right stream class and skips HL2-only feature paths
         (telemetry decode, AK4951 audio out, OC C&C) when on P2.
+
+        Multi-radio handling: if more than one radio replied, the
+        installed `_radio_chooser` is called with the full list; the
+        default (lambda lst: lst[0]) preserves the single-radio
+        auto-connect behavior, but the GUI replaces it at startup with
+        a Qt picker dialog so the operator can select between e.g. an
+        HL2 and an ANAN-G2 sharing the same LAN.
 
         Per-interface diagnostic lines are pumped to the console so
         tester bug reports include exactly which NICs were tried and
@@ -2937,7 +2957,15 @@ class Radio(QObject):
                 "for details, or enter the IP manually in Settings → Radio.",
                 8000)
             return
-        r = radios[0]
+        if len(radios) == 1:
+            r = radios[0]
+        else:
+            r = self._radio_chooser(radios)
+            if r is None:
+                self.status_message.emit(
+                    f"{len(radios)} radios found — selection cancelled.",
+                    4000)
+                return
         self._protocol = r.protocol
         self._board_id = r.board_id
         self.set_ip(r.ip)

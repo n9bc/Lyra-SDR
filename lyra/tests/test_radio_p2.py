@@ -137,6 +137,10 @@ class _DiscoverStub:
         self._board_id = None
         self._ip = "10.10.30.100"
         self._status_msgs = []
+        # Default chooser preserves the historical "first radio wins"
+        # behavior; tests that need to inspect the chooser call replace
+        # this attribute directly before invoking discover().
+        self._radio_chooser = lambda lst: lst[0]
 
     def set_ip(self, ip):
         self._ip = ip
@@ -222,13 +226,68 @@ class TestRadioDiscoverP2(unittest.TestCase):
         stub = self._run_discover([])
         self.assertIsNone(stub._board_id)
 
-    def test_first_radio_wins_protocol(self):
+    def test_default_chooser_picks_first_for_multi_radio(self):
+        # Default chooser is `lambda lst: lst[0]` — same outcome as the
+        # historical "auto-connect to first hit" behavior.
         stub = self._run_discover([_p2_radio(), _p1_radio()])
         self.assertEqual(stub._protocol, "P2")
-
-    def test_first_radio_wins_board_id(self):
-        stub = self._run_discover([_p2_radio(), _p1_radio()])
         self.assertEqual(stub._board_id, 10)
+
+
+# ---------------------------------------------------------------------------
+# Tests: multi-radio chooser callback
+# ---------------------------------------------------------------------------
+
+class TestRadioChooser(unittest.TestCase):
+    """When >1 radio replies, Radio.discover() defers selection to the
+    installed chooser callback so the GUI can pop a picker dialog."""
+
+    def test_single_radio_does_not_invoke_chooser(self):
+        # Auto-connect path should never call the chooser when only one
+        # radio replied — that's a UX regression we explicitly avoid.
+        called = []
+        stub = _DiscoverStub()
+        stub._radio_chooser = lambda lst: called.append(lst) or lst[0]
+        with patch("lyra.radio.discover_all", return_value=[_p1_radio()]):
+            Radio.discover(stub)
+        self.assertEqual(called, [], "chooser must NOT be called for 1 radio")
+        self.assertEqual(stub._protocol, "P1")
+
+    def test_multi_radio_invokes_chooser_with_full_list(self):
+        captured = []
+        stub = _DiscoverStub()
+        radios = [_p2_radio(), _p1_radio()]
+        stub._radio_chooser = lambda lst: captured.append(list(lst)) or lst[0]
+        with patch("lyra.radio.discover_all", return_value=radios):
+            Radio.discover(stub)
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(len(captured[0]), 2)
+
+    def test_chooser_return_drives_selection(self):
+        # When the chooser picks the second radio (P1), Radio's protocol
+        # and board_id reflect that selection — not the default "first".
+        stub = _DiscoverStub()
+        radios = [_p2_radio(), _p1_radio()]
+        stub._radio_chooser = lambda lst: lst[1]   # pick P1, not P2
+        with patch("lyra.radio.discover_all", return_value=radios):
+            Radio.discover(stub)
+        self.assertEqual(stub._protocol, "P1")
+        self.assertEqual(stub._board_id, 6)
+        self.assertEqual(stub._ip, "10.10.30.100")
+
+    def test_chooser_returning_none_aborts_connection(self):
+        # User cancels the picker → no IP / protocol change, status note
+        # emitted. We don't assert the exact text, just that state is
+        # untouched.
+        stub = _DiscoverStub()
+        original_ip = stub._ip
+        stub._radio_chooser = lambda lst: None
+        with patch("lyra.radio.discover_all",
+                   return_value=[_p2_radio(), _p1_radio()]):
+            Radio.discover(stub)
+        self.assertEqual(stub._ip, original_ip)
+        self.assertEqual(stub._protocol, "P1")     # unchanged from default
+        self.assertIsNone(stub._board_id)          # unchanged from default
 
 
 # ---------------------------------------------------------------------------

@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self._settings = QSettings("N8SDR", "Lyra")
         self._migrate_legacy_settings()
         self.radio = Radio()
+        self.radio.set_radio_chooser(self._choose_radio_dialog)
 
         # ── Compose panels ───────────────────────────────────────────
         # Connection controls (IP, Discover) moved into Settings → Radio.
@@ -1894,6 +1895,29 @@ class MainWindow(QMainWindow):
             "Your saved default layout has been removed.\n\n"
             "View → 'Restore my saved layout' will now report\n"
             "'no saved layout' until you save a new one.")
+
+    # ── Multi-radio chooser (installed on Radio at startup) ──────────
+    def _choose_radio_dialog(self, radios: list):
+        """Pop a picker when discover_all() returns more than one radio
+        (e.g. an HL2 and an ANAN-G2 sharing the same LAN). Returns the
+        operator's selection, or ``None`` if they cancel — Radio.discover
+        treats ``None`` as "abort connection" and emits a status-bar note."""
+        from PySide6.QtWidgets import QInputDialog
+        items = [
+            f"[{r.protocol}] {r.board_name} at {r.ip}"
+            for r in radios
+        ]
+        item, ok = QInputDialog.getItem(
+            self,
+            "Multiple radios found",
+            "Select which radio to connect to:",
+            items,
+            current=0,
+            editable=False,
+        )
+        if not ok:
+            return None
+        return radios[items.index(item)]
 
     # ── Persistence ──────────────────────────────────────────────────
     def _migrate_legacy_settings(self):
