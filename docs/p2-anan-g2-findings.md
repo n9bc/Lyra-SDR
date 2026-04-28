@@ -8,8 +8,8 @@ gap end-to-end so the next session can fix it without re-deriving
 context.
 
 Sources used:
-- Wire capture from a working Thetis session (`thetis_live.pcapng`,
-  21,848 packets, 8 s window).
+- Wire capture from a working reference openHPSDR client session
+  (`wire_live.pcapng`, 21,848 packets, 8 s window).
 - `pihpsdr/src/new_protocol.c` (DL1YCF) — the canonical P2 client.
 - `deskhpsdr/src/new_protocol.c` (DL1BZ fork) — same byte layouts.
 - v4.4 spec PDF — already referenced by the existing
@@ -44,8 +44,8 @@ Seven issues, ranked by impact at discovery:
    to come from `BoardSpec`. ADC dither_mask=0x07 added for Apache.
 5. **Apache uses the source port of the host's commands as the IQ
    destination**, ignoring the General Packet's declared body port
-   (`ddc_iq_destination_port`). Verified against captured Thetis:
-   declared body = 1035, IQ arrived on Thetis's source port 51538.
+   (`ddc_iq_destination_port`). Verified against the wire capture:
+   declared body = 1035, IQ arrived on the host's source port 51538.
    **Fixed** — `P2Stream` now uses a single shared socket for sending
    commands and receiving IQ.
 6. **Windows NIC coalescing concatenates IQ frames.** A single
@@ -72,7 +72,7 @@ hardware.
 
 ---
 
-## The Thetis handshake — packet by packet
+## The reference-client handshake — packet by packet
 
 Captured order and cadence on the wire (port refers to dst port for
 host→radio):
@@ -108,8 +108,8 @@ src 1037 (variable): DDC2 IQ stream (RX1). This is what we want.
 
 ## Packet 1 — General Packet (60 bytes, port 1024)
 
-Refreshed by Thetis every 500 ms. Most bytes are zero; the
-load-bearing ones:
+Refreshed by the reference client every 500 ms. Most bytes are zero;
+the load-bearing ones:
 
 | Offset | Field | Required value (ORION2) | Source |
 |--------|-------|--------------------------|--------|
@@ -134,14 +134,14 @@ load-bearing ones:
 | **58** | **PA enable** | **`0x01`** | ORION2 needs PA=1 even in RX |
 | **59** | **Alex enable** | **`0x03`** | ORION2 needs both Alex0 + Alex1 |
 
-The captured Thetis byte 37 is `0x08`. Our builder writes `0x00`.
+The captured byte 37 is `0x08`. Our builder writes `0x00`.
 That single byte makes the radio interpret all DDC frequencies as raw
 Hz and silently mis-tune.
 
 Bytes 33 also showed `0x03` and byte 34 `0x20` in the capture; both
 are zero in pi-hpsdr's general packet. They are likely set by
-Thetis for a feature pi-hpsdr doesn't use (envelope PWM dot-clock,
-maybe). Not load-bearing — pi-hpsdr works without them.
+the reference client for a feature pi-hpsdr doesn't use (envelope
+PWM dot-clock, maybe). Not load-bearing — pi-hpsdr works without them.
 
 ---
 
@@ -154,7 +154,7 @@ Refreshed on configuration change. Layout (pi-hpsdr
 |--------|-------|-------|
 | 0–3    | sequence (BE) | per-port counter |
 | 4      | n_adcs | **2 for ANAN-G2** (we send 1) |
-| 5      | dither mask | bit per ADC: `0x07` = ADC0+1+2 dither, what Thetis sends |
+| 5      | dither mask | bit per ADC: `0x07` = ADC0+1+2 dither, observed on wire |
 | 6      | random-whitening mask | usually 0 |
 | 7–16   | DDC enable mask, 80 bits little-end-byte | bit 2 set → byte 7 = `0x04` for RX1 on ORION2 |
 | 17 + ddc·6 + 0 | ADC source for this DDC | 0 = ADC0, 1 = ADC1 |
@@ -175,10 +175,10 @@ wire layout matches pi-hpsdr. The remaining bug is just that we use
 the wrong `block_off` (DDC0 → 17, should be DDC2 → 29) and the wrong
 enable-mask bit (bit 0 → bit 2).
 
-Thetis additionally pre-configures DDC1, DDC3, DDC4, DDC5, DDC6 with
-sane defaults even though only DDC2 is enabled. The radio only
-streams the enabled DDC; the extra config blocks are forward-looking
-for diversity / dual-RX. Not required, but cheap.
+The reference client additionally pre-configures DDC1, DDC3, DDC4,
+DDC5, DDC6 with sane defaults even though only DDC2 is enabled. The
+radio only streams the enabled DDC; the extra config blocks are
+forward-looking for diversity / dual-RX. Not required, but cheap.
 
 ---
 
@@ -203,7 +203,7 @@ startup. Verbatim values from
 | 58     | ADC1 attenuation | `0x00` |
 | 59     | ADC0 attenuation | `0x00` |
 
-The Thetis capture shows the same first 16 bytes. Sending this once
+The wire capture shows the same first 16 bytes. Sending this once
 at session start should be enough — pi-hpsdr resends it only on
 keyer-config change.
 
@@ -211,8 +211,9 @@ keyer-config change.
 
 ## Packet 4 — High Priority (1444 bytes, port 1027)
 
-Sent on every state change AND refreshed on a timer (Thetis: 500 ms,
-pi-hpsdr: configurable, our v1: 1 s). Critical fields:
+Sent on every state change AND refreshed on a timer (reference client
+captured at 500 ms, pi-hpsdr: configurable, our v1: 1 s). Critical
+fields:
 
 | Offset | Field | Notes |
 |--------|-------|-------|
@@ -234,15 +235,15 @@ pi-hpsdr: configurable, our v1: 1 s). Critical fields:
 4_294_967_296 / 122_880_000)` = `498_073_600` = `0x1DB00000`. This
 goes at bytes **17–20** (DDC2), not 9–12.
 
-The captured Thetis values confirm: `0x150E06F6` at bytes 17–20 →
+The captured wire values confirm: `0x150E06F6` at bytes 17–20 →
 `/ 34.9525` → 10.106 MHz (radio was tuned to 30 m), and `0x1D630A83`
 at bytes 21–24 → 14.097 MHz (RX2 on 20 m).
 
-**Alex0/Alex1 control words**: Thetis writes `0x01100002` at
+**Alex0/Alex1 control words**: wire capture shows `0x01100002` at
 1428–1431 and `0x01100010` at 1432–1435. Bit assignments encode
 preselector relays per Apache hardware doc. For a generic
-"don't-mute-the-input" RX configuration, mirror what Thetis sends
-exactly. Future work: derive these from current RX frequency.
+"don't-mute-the-input" RX configuration, mirror the wire-captured
+values exactly. Future work: derive these from current RX frequency.
 
 `open_collector_outputs` byte 1401 = `0x90` in the capture. This is
 the OC band-switch byte that drives the rear-panel auto-tuner /
@@ -331,7 +332,7 @@ Concrete edits, in roughly the order they should be made and tested:
      converts internally (cleaner). Recommend (b): convert via
      `phase = round(freq_hz * (1 << 32) / 122_880_000)`.
    - Add support for the Alex0/Alex1 control words at bytes 1428–
-     1435. For v1, hardcode the Thetis values
+     1435. For v1, hardcode the wire-captured values
      (`0x01100002` / `0x01100010`); for v2, derive from frequency.
 
 4. **Add `build_duc_specific_packet`** — emit the 60-byte packet
@@ -363,8 +364,8 @@ Concrete edits, in roughly the order they should be made and tested:
    `parse_ddc_iq_frame(data)` to the new
    `parse_ddc_iq_frames(data, frame_size)`.
 
-5. Send the General Packet refresh on a 500 ms cadence (matches
-   Thetis; current code only sends it once at start).
+5. Send the General Packet refresh on a 500 ms cadence (matches the
+   wire-captured cadence; current code only sends it once at start).
 
 ### `boards.py`
 
@@ -404,8 +405,8 @@ Concrete edits, in roughly the order they should be made and tested:
    `frames` should grow at ≈ 192000 / 238 ≈ 807 frames/sec — so
    ~8000 frames in 10 s. `seq_err` should stay 0.
 3. Re-capture with dumpcap and diff our High Priority bytes against
-   Thetis's. They should match byte-for-byte except for the
-   sequence number, frequency value, and Alex bits.
+   the original wire-capture's. They should match byte-for-byte
+   except for the sequence number, frequency value, and Alex bits.
 4. Run the existing 47-test P2 suite plus the new ANAN-G2 tests.
 5. Run loopback (`tools/p2_loopback.py`) to confirm no regression on
    the synthetic path.
@@ -414,12 +415,12 @@ Concrete edits, in roughly the order they should be made and tested:
 
 ## Reference artifacts
 
-- `thetis_live.pcapng` — 8 s capture of working Thetis ↔ ANAN-G2.
-  Filter to host→radio with `ip.src==192.168.10.173` to see the
-  control packets; filter to `udp.srcport==1037` for IQ.
-- `thetis_capture.pcapng` — earlier 19 MB capture of the radio
-  streaming to a stale Thetis port (Thetis had crashed; useful for
-  studying IQ format under varying RSC sizes).
+- `wire_live.pcapng` — 8 s capture of a working reference client
+  ↔ ANAN-G2. Filter to host→radio with `ip.src==192.168.10.173` to
+  see the control packets; filter to `udp.srcport==1037` for IQ.
+- `wire_capture.pcapng` — earlier 19 MB capture of the radio
+  streaming to a stale destination port (the reference client had
+  crashed; useful for studying IQ format under varying RSC sizes).
 - `_p1024.txt`, `_p1025.txt`, `_p1026.txt`, `_p1027.txt` — extracted
   hex of every host→radio packet on those ports.
 - `_iq_frame.txt` — one real DDC2 IQ frame, used to validate the

@@ -139,12 +139,12 @@ class P2Stream:
 
         # Apache firmware uses the SOURCE port of incoming control packets
         # as the IQ destination, ignoring the port declared in the
-        # General Packet body. Verified against ANAN-G2 wire capture vs
-        # Thetis (Thetis declared body=1035 but the radio sent IQ back
-        # to Thetis's source port 51538). To match that behavior we use
-        # a single shared socket for sending control packets and
-        # receiving IQ — the OS-assigned ephemeral source port becomes
-        # the IQ destination automatically.
+        # General Packet body. Wire captures against ANAN-G2 confirmed
+        # this: a control packet declared body=1035 but the radio sent
+        # IQ back to the host's ephemeral source port (51538 in that
+        # capture). To match that behavior we use a single shared socket
+        # for sending control packets and receiving IQ — the OS-assigned
+        # ephemeral source port becomes the IQ destination automatically.
         self._send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self._send_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         # Big recv buffer so NIC-coalesced 4-8x1444 IQ frames fit in one recv.
@@ -187,7 +187,7 @@ class P2Stream:
             if spec is not None:
                 n_adcs = spec.n_adcs
         # Apache (DDC2-offset boards) ships dither on ADC0+1+2; Hermes-
-        # class radios just leave it off. Matches Thetis byte 5 = 0x07.
+        # class radios just leave it off. Wire-capture dither byte = 0x07.
         dither = 0x07 if self._rx1_ddc_index >= 2 else 0x00
         self._send(
             build_ddc_specific_packet(
@@ -314,17 +314,18 @@ class P2Stream:
         """Caller MUST hold self._high_priority_lock."""
         if self._send_sock is None:
             return
-        # Write the RX1 frequency into DDC0/DDC1/RX1's slot. Thetis does
-        # this on ANAN-G2 even though only the active DDC streams — the
-        # firmware appears to use DDC0 as a fallback tuning state, and
-        # without it the IQ pipeline doesn't arm. Cheap to do for all
-        # boards (extra zero writes are harmless on Hermes-class).
+        # Write the RX1 frequency into DDC0/DDC1/RX1's slot. Wire captures
+        # show this is required on ANAN-G2 even though only the active
+        # DDC streams — the firmware appears to use DDC0 as a fallback
+        # tuning state, and without it the IQ pipeline doesn't arm.
+        # Cheap to do for all boards (extra zero writes are harmless on
+        # Hermes-class).
         ddc_freqs = {0: self._rx_freq_hz, 1: self._rx_freq_hz}
         ddc_freqs[self._rx1_ddc_index] = self._rx_freq_hz
         cfg = HighPriorityConfig(
             run=True,
             ddc_freqs_hz=ddc_freqs,
-            # Captured Thetis Alex words for an idle ANAN-G2 on 20 m.
+            # Wire-captured Alex control words for an idle ANAN-G2 on 20 m.
             # Future work: derive per-band from the current frequency.
             alex0_word=0x01100010 if self._rx1_ddc_index >= 2 else 0,
             alex1_word=0x01100002 if self._rx1_ddc_index >= 2 else 0,
