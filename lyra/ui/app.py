@@ -374,6 +374,15 @@ class MainWindow(QMainWindow):
             "layouts or current state.")
         reset.triggered.connect(self._reset_layout)
         view_menu.addAction(reset)
+
+        n8sdr_layout = QAction("Apply N8SDR layout", self)
+        n8sdr_layout.setToolTip(
+            "Apply the N8SDR operator's 3-row layout: Band+Tuning+Meters "
+            "across the top, Mode+Filter and DSP+Audio stacked beneath, "
+            "Display column on the right next to Meters. After applying, "
+            "use 'Save current layout as my default' to lock it in.")
+        n8sdr_layout.triggered.connect(self._apply_n8sdr_layout)
+        view_menu.addAction(n8sdr_layout)
         clear_default = QAction("Forget saved layout", self)
         clear_default.setToolTip(
             "Discard the user-saved default layout. "
@@ -1573,6 +1582,55 @@ class MainWindow(QMainWindow):
             dock.setVisible(True)
         self.statusBar().showMessage(
             "Panel layout reset to factory defaults", 2500)
+
+    def _apply_n8sdr_layout(self):
+        """Apply the N8SDR operator's preferred 3-row + side-column layout.
+
+        Target arrangement (matches the screenshot the operator sent):
+
+            ┌────────┬─────────────────┬────────┐
+            │  band  │     tuning      │ meters │
+            ├────────┴─────────────────┤        │
+            │      mode + filter       │  view  │
+            ├──────────────────────────┤        │
+            │       dsp + audio        │        │
+            └──────────────────────────┴────────┘
+            [ central panadapter / waterfall ]
+
+        Sequence chosen so Qt's QSplitter nesting produces left- and
+        right-column groups: build the top row first (band|tuning|
+        meters), then split the meters cell vertically to add view
+        below it (right column established), then split band
+        vertically to drop mode below it, and split mode again to
+        add dsp. Qt nests the vertical splits inside the band cell's
+        column container — and because the band cell's container is
+        what determines the column boundary, mode and dsp inherit
+        the band+tuning width."""
+        for dock in self.docks.values():
+            self.removeDockWidget(dock)
+            dock.setFloating(False)
+            dock.setVisible(True)
+        # Top row: band | tuning | meters
+        self.addDockWidget(Qt.TopDockWidgetArea, self.docks["band"])
+        self.splitDockWidget(self.docks["band"],
+                             self.docks["tuning"], Qt.Horizontal)
+        self.splitDockWidget(self.docks["tuning"],
+                             self.docks["meters"], Qt.Horizontal)
+        # Right column: view (Display) below meters
+        self.splitDockWidget(self.docks["meters"],
+                             self.docks["view"], Qt.Vertical)
+        # Left column: mode + filter and dsp + audio stacked below
+        # the band|tuning row
+        self.splitDockWidget(self.docks["band"],
+                             self.docks["mode"], Qt.Vertical)
+        self.splitDockWidget(self.docks["mode"],
+                             self.docks["dsp"], Qt.Vertical)
+        for dock in self.docks.values():
+            dock.setVisible(True)
+        self.statusBar().showMessage(
+            "Applied N8SDR layout — use View → 'Save current layout "
+            "as my default' to lock it in",
+            5000)
 
     def _restore_user_default_layout(self):
         """View → Restore my saved layout — load whatever the operator
