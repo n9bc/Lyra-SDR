@@ -2889,23 +2889,21 @@ class Radio(QObject):
                 # appear above the current peaks.
                 if target_hi - target_lo < self.AUTO_SCALE_MIN_SPAN_DB:
                     target_hi = target_lo + self.AUTO_SCALE_MIN_SPAN_DB
-                # Clamp to operator-set bounds (the user range)
-                # before the global -150..0 dBFS safety clamp.
-                # If the operator narrowed the visible range, auto-
-                # scale moves WITHIN that window but never escapes
-                # it — the operator's deliberate choice wins. If
-                # they've never narrowed (default state), the user
-                # range matches the live range so this clamp is a
-                # no-op.
-                target_lo = max(target_lo, self._user_range_min_db)
-                target_hi = min(target_hi, self._user_range_max_db)
-                # If the clamp inverted the range (user range narrower
-                # than the auto target's span), preserve the user
-                # range as-is and skip this auto update — auto can't
-                # do anything meaningful inside a too-tight window.
-                if target_hi - target_lo < 3.0:
-                    return
-                # Final safety clamp to global -150..0 dBFS.
+                # No user-range clamp on auto-scale.
+                #
+                # An earlier design used self._user_range_min/max as a
+                # CLAMP that auto-scale couldn't escape — meant to honor
+                # an operator who'd narrowed the display to a specific
+                # window. In practice, an accidental Y-axis drag would
+                # pinch the bounds (e.g. -121..-109, a 12 dB window)
+                # and auto-scale could never expand again, so on a band
+                # with strong signals the trace clipped against the top
+                # and looked broken ("upside down" was the user's
+                # description). Now auto-scale always finds a range
+                # that fits the actual signals; an operator who really
+                # wants a narrow window just turns auto-scale off via
+                # the Settings checkbox to lock it. Final safety clamp
+                # below still guards against pathological values.
                 target_lo = max(-150.0, min(-3.0, target_lo))
                 target_hi = max(target_lo + 3.0, min(0.0, target_hi))
                 # Internal call — `from_user=False` updates only the

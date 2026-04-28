@@ -1813,7 +1813,15 @@ class MainWindow(QMainWindow):
             spec_range = _migrate_range(
                 "visuals/spectrum_min_db", "visuals/spectrum_max_db")
             if spec_range is not None:
-                r.set_spectrum_db_range(*spec_range)
+                # Sanity check — a previous accidental Y-axis drag may
+                # have persisted a too-narrow range (e.g. 12 dB). On
+                # restart that pinches the trace at startup until auto-
+                # scale catches up. If the saved span is < 30 dB, treat
+                # as accidental and fall back to the wide default so
+                # the first few frames show a usable trace.
+                _lo, _hi = spec_range
+                if _hi - _lo >= 30.0:
+                    r.set_spectrum_db_range(_lo, _hi)
             wf_range = _migrate_range(
                 "visuals/waterfall_min_db", "visuals/waterfall_max_db")
             if wf_range is not None:
