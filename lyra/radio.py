@@ -880,18 +880,11 @@ class Radio(QObject):
         self._agc_peak = 1e-4
         self._agc_hang_counter = 0
         self._smeter_avg_lin = 0.0
-        # Re-assert the sample-rate keepalive C&C. _set_rx1_freq
-        # above replaced _keepalive_cc with the freq command, so
-        # the periodic keepalive stopped re-asserting C&C 0x00
-        # (sample-rate config). HL2 gateware seems to need that
-        # re-assertion across LO retunes; without it the EP6
-        # stream can stall in a way only a manual rate cycle
-        # unsticks. This single C&C resend is the cheap fix.
-        if self._stream:
-            try:
-                self._stream.reassert_rate_keepalive()
-            except Exception:
-                pass
+        # NOTE: previous version called _stream.reassert_rate_keepalive()
+        # here as a band-aid for stuck-audio after big freq jumps.
+        # That's now redundant because the stream uses round-robin
+        # C&C keepalive (every register stays fresh automatically) —
+        # see HL2Stream._cc_registers / _rx_loop. Removed for clarity.
         self._rebuild_notches()
         # If the band just changed and filter board is active, push the
         # new OC pattern so the N2ADR relays follow.
@@ -984,16 +977,8 @@ class Radio(QObject):
         self._agc_peak = 1e-4
         self._agc_hang_counter = 0
         self._smeter_avg_lin = 0.0
-        # Re-assert the sample-rate keepalive C&C — same reason as
-        # set_freq_hz. Mode change typically pairs with bandwidth /
-        # filter changes that may have queued LNA-gain or other
-        # C&Cs that displaced the sample-rate keepalive. Cheap
-        # belt-and-suspenders against the stuck-stream symptom.
-        if self._stream:
-            try:
-                self._stream.reassert_rate_keepalive()
-            except Exception:
-                pass
+        # No reassert needed — round-robin C&C keepalive in
+        # HL2Stream._rx_loop keeps every register fresh.
         if not self._suppress_band_save:
             self._save_current_band_memory()
         self.mode_changed.emit(alias)

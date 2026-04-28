@@ -213,6 +213,25 @@ class HL2Stream:
         # independent RX/TX frequency control. C4[5:3] = NDDC - 1
         # (0 = 1 receiver).
         self._config_c4 = 0x04  # duplex=1, NDDC=1
+        # Round-robin C&C register table — keyed by c0, value is the
+        # (c1,c2,c3,c4) bytes. Each USB block in an EP2 frame can carry
+        # one C&C write, so to keep ALL configured registers fresh on
+        # the HL2 gateware we cycle through this table across frames.
+        # Mirrors Thetis's networkproto1.c WriteMainLoop_HL2 round-robin
+        # (each frame increments out_control_idx and wraps back to 0
+        # after the last register, so every register is re-asserted
+        # every ~17 frames). Without this, only the most-recently-
+        # modified register stays "fresh" — the HL2 EP6 IQ stream
+        # could stall in a way only a manual sample-rate cycle
+        # unsticks (because that cycle re-issues C&C 0x00).
+        self._cc_registers: dict[int, tuple[int, int, int, int]] = {
+            0x00: (SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4),
+        }
+        self._cc_rr_idx: int = 0
+        self._cc_lock = threading.Lock()
+        # Legacy fallback — the old code path stored last-sent register
+        # here. Kept synchronized with the dict so any external readers
+        # (none in current codebase) still see something sensible.
         self._keepalive_cc: tuple[int, int, int, int, int] = (
             0x00, SAMPLE_RATES[sample_rate], 0x00, 0x00, self._config_c4
         )
@@ -404,6 +423,8 @@ class HL2Stream:
         c4 = hz & 0xFF
         print(f"[stream] set RX1 freq {hz} Hz  C&C={c0:02X} {c1:02X} {c2:02X} {c3:02X} {c4:02X}")
         self._send_cc(c0, c1, c2, c3, c4)
+        with self._cc_lock:
+            self._cc_registers[c0] = (c1, c2, c3, c4)
         self._keepalive_cc = (c0, c1, c2, c3, c4)
 
     def set_sample_rate(self, rate: int):
@@ -419,29 +440,17 @@ class HL2Stream:
         self._ep6_count = 0
         rate_code = SAMPLE_RATES[rate]
         self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
+        with self._cc_lock:
+            self._cc_registers[0x00] = (rate_code, 0x00, 0x00, self._config_c4)
         self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
 
     def reassert_rate_keepalive(self):
-        """Re-send the sample-rate C&C without changing rate, and put
-        it back as the keepalive payload. Field test (N8SDR 2026-04-28):
-        big freq+mode jumps (AM 10 MHz WWV ↔ DIGU 7.074 MHz FT8) left
-        audio stuck silent until the operator cycled the sample rate.
-        Diagnosis: every _set_rx1_freq / set_lna_gain_db call REPLACES
-        _keepalive_cc with its own register, so the periodic keepalive
-        stops re-asserting the sample-rate config (C&C 0x00). The HL2
-        gateware seems to need that periodic re-assertion to keep IQ
-        flowing cleanly across LO retunes — without it, the EP6 stream
-        can stall in some hard-to-reproduce way that only a fresh C&C
-        0x00 unsticks. Calling this from Radio.set_freq_hz +
-        Radio.set_mode is the cheap "rate-cycle equivalent" that
-        avoids the visible 192→48→192 dance."""
-        if self._sock is None:
-            return
-        rate_code = SAMPLE_RATES.get(self.sample_rate)
-        if rate_code is None:
-            return
-        self._send_cc(0x00, rate_code, 0x00, 0x00, self._config_c4)
-        self._keepalive_cc = (0x00, rate_code, 0x00, 0x00, self._config_c4)
+        """Vestigial — kept for callers from before the round-robin
+        C&C cycling landed. Now a no-op because every register
+        (including 0x00 sample rate) is re-asserted automatically
+        every ~N frames by the round-robin keepalive in _rx_loop.
+        Safe to remove once all callers are cleaned up."""
+        return
 
     def set_lna_gain_db(self, gain_db: int):
         """Set HL2 LNA gain in dB. Range -12..+48.
@@ -454,6 +463,8 @@ class HL2Stream:
             raise RuntimeError("stream not started")
         c4 = 0x40 | ((gain_db + 12) & 0x3F)
         self._send_cc(0x14, 0, 0, 0, c4)
+        with self._cc_lock:
+            self._cc_registers[0x14] = (0, 0, 0, c4)
         self._keepalive_cc = (0x14, 0, 0, 0, c4)
 
     def stop(self):
@@ -521,8 +532,25 @@ class HL2Stream:
             self._ep6_count = getattr(self, "_ep6_count", 0) + 1
             if self._ep6_count % n != 0:
                 continue
+            # Round-robin C&C keepalive — pick the next register from
+            # the registered set so EVERY one (sample rate, RX1 freq,
+            # LNA, etc.) gets re-asserted cyclically. Mirrors Thetis's
+            # WriteMainLoop_HL2 (out_control_idx wraps over all
+            # registers each frame). Single-register approach used to
+            # cause stuck-silence after big freq jumps because once
+            # _keepalive_cc held a freq command, sample-rate (C&C
+            # 0x00) stopped going out and HL2 EP6 IQ stream could
+            # stall.
             try:
-                c0, c1, c2, c3, c4 = self._keepalive_cc
+                with self._cc_lock:
+                    if self._cc_registers:
+                        keys = sorted(self._cc_registers.keys())
+                        c0 = keys[self._cc_rr_idx % len(keys)]
+                        c1, c2, c3, c4 = self._cc_registers[c0]
+                        self._cc_rr_idx = (self._cc_rr_idx + 1) % len(keys)
+                    else:
+                        c0 = c1 = c2 = c3 = 0
+                        c4 = self._config_c4
                 self._send_cc(c0, c1, c2, c3, c4)
             except OSError:
                 break
