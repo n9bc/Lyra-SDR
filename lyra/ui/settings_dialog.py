@@ -1233,6 +1233,25 @@ class VisualsSettingsTab(QWidget):
             self.radio.set_show_lyra_meteors)
         gp.addWidget(self.lyra_meteors_check, 2, 0, 1, 2, Qt.AlignLeft)
 
+        # Grid line toggle — 9×9 divisions on the panadapter. Some
+        # operators rely on them as a visual reference; others find
+        # them noisy. Default ON.
+        self.spectrum_grid_check = QCheckBox(
+            "Show panadapter grid (9×9 divisions)")
+        self.spectrum_grid_check.setChecked(
+            bool(self.radio.show_spectrum_grid))
+        self.spectrum_grid_check.setToolTip(
+            "When on (default): a faint dark-blue grid overlays the\n"
+            "panadapter, dividing it into 9 horizontal and 9 vertical\n"
+            "sections. Useful for eyeballing dB and frequency.\n\n"
+            "When off: clean trace-only view. The dB scale labels on\n"
+            "the right edge and frequency labels on the bottom remain\n"
+            "visible — only the dotted grid lines disappear."
+        )
+        self.spectrum_grid_check.toggled.connect(
+            self.radio.set_show_spectrum_grid)
+        gp.addWidget(self.spectrum_grid_check, 3, 0, 1, 2, Qt.AlignLeft)
+
         v.addWidget(grp_pal)
 
         # ── dB ranges (spectrum + waterfall) ──────────────────────

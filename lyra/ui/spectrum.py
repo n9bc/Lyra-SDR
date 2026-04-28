@@ -94,6 +94,9 @@ class SpectrumWidget(_PaintedWidget):
         # Occasional meteor streaks across the panadapter — independent
         # toggle, default OFF (opt-in flair).
         self._show_meteors: bool = False
+        # Grid lines (9×9 horiz/vert dotted divisions) — operator
+        # toggle. Default ON; switched via Settings → Visuals.
+        self._show_grid: bool = True
         self._passband_hi_hz: int = 0
         # Noise-floor reference line. None = hidden; otherwise draw a
         # muted dashed horizontal line at the corresponding y-pixel.
@@ -191,6 +194,11 @@ class SpectrumWidget(_PaintedWidget):
     def set_show_meteors(self, visible: bool) -> None:
         """Toggle occasional meteor streaks across the panadapter."""
         self._show_meteors = bool(visible)
+        self.update()
+
+    def set_show_grid(self, visible: bool) -> None:
+        """Toggle the 9×9 grid divisions on the panadapter."""
+        self._show_grid = bool(visible)
         self.update()
 
     def set_spectrum_trace_color(self, hex_str: str):
@@ -694,14 +702,16 @@ class SpectrumWidget(_PaintedWidget):
         w = self.width()
         h = self.height()
 
-        # Grid
-        p.setPen(QPen(GRID, 1))
-        for i in range(1, 10):
-            y = int(h * i / 10)
-            p.drawLine(0, y, w, y)
-        for i in range(1, 10):
-            x = int(w * i / 10)
-            p.drawLine(x, 0, x, h)
+        # Grid — operator-toggleable via Settings → Visuals. Default
+        # on; some operators prefer a clean trace-only view.
+        if self._show_grid:
+            p.setPen(QPen(GRID, 1))
+            for i in range(1, 10):
+                y = int(h * i / 10)
+                p.drawLine(0, y, w, y)
+            for i in range(1, 10):
+                x = int(w * i / 10)
+                p.drawLine(x, 0, x, h)
 
         # Lyra constellation watermark — drawn after the grid but
         # before the trace, so the spectrum line dominates visually.

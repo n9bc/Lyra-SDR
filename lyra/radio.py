@@ -117,6 +117,10 @@ class Radio(QObject):
     # toggle from the constellation watermark so operators can run
     # one, the other, both, or neither.
     lyra_meteors_changed       = Signal(bool)
+    # Panadapter grid lines (the 9×9 horiz/vert divisions). Some
+    # operators rely on them for visual reference; some find them
+    # noisy. Toggleable.
+    spectrum_grid_changed      = Signal(bool)
     spectrum_db_range_changed  = Signal(float, float)  # (min_db, max_db)
     spectrum_cal_db_changed    = Signal(float)         # operator cal trim, dB
     smeter_cal_db_changed      = Signal(float)         # S-meter cal trim, dB
@@ -566,6 +570,10 @@ class Radio(QObject):
         # gap 15..50 s, max 1 visible at a time. Independent of the
         # constellation watermark.
         self._show_lyra_meteors = False
+        # Panadapter grid lines (9×9 dotted divisions). Default ON
+        # since most operators expect a reference grid; turn off for
+        # a cleaner trace-only view. Persisted via QSettings.
+        self._show_spectrum_grid = True
         self._spectrum_min_db   = -140.0
         self._spectrum_max_db   = -50.0
         # Operator-set BOUNDS for the spectrum range. Auto-scale is
@@ -2334,6 +2342,22 @@ class Radio(QObject):
         from PySide6.QtCore import QSettings as _QS
         _QS("N8SDR", "Lyra").setValue("visuals/show_lyra_constellation", v)
         self.lyra_constellation_changed.emit(v)
+
+    @property
+    def show_spectrum_grid(self) -> bool:
+        return self._show_spectrum_grid
+
+    def set_show_spectrum_grid(self, visible: bool) -> None:
+        """Toggle the panadapter grid (the 9×9 horiz/vert divisions).
+        Persisted via QSettings; both spectrum widget backends listen
+        for the change and repaint."""
+        v = bool(visible)
+        if v == self._show_spectrum_grid:
+            return
+        self._show_spectrum_grid = v
+        from PySide6.QtCore import QSettings as _QS
+        _QS("N8SDR", "Lyra").setValue("visuals/show_spectrum_grid", v)
+        self.spectrum_grid_changed.emit(v)
 
     # ── Spectrum cal trim ──────────────────────────────────────────
     # Operator-adjustable per-rig calibration offset (dB) added to

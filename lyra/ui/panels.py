@@ -2166,6 +2166,10 @@ class SpectrumPanel(GlassPanel):
         self.widget.set_show_meteors(bool(self.radio.show_lyra_meteors))
         self.radio.lyra_meteors_changed.connect(
             self.widget.set_show_meteors)
+        # Grid lines (9×9 horiz/vert divisions) — operator toggle.
+        self.widget.set_show_grid(bool(self.radio.show_spectrum_grid))
+        self.radio.spectrum_grid_changed.connect(
+            self.widget.set_show_grid)
         # Notch markers (Phase B.13) — seed + track changes.
         self.widget.set_notches(self.radio.notch_details)
         self.radio.notches_changed.connect(self.widget.set_notches)
@@ -2244,6 +2248,9 @@ class SpectrumPanel(GlassPanel):
         # Occasional meteors — separate toggle, opt-in flair.
         self.widget.set_show_meteors(bool(radio.show_lyra_meteors))
         radio.lyra_meteors_changed.connect(self.widget.set_show_meteors)
+        # Grid lines (9×9 horiz/vert divisions) — operator toggle.
+        self.widget.set_show_grid(bool(radio.show_spectrum_grid))
+        radio.spectrum_grid_changed.connect(self.widget.set_show_grid)
         # Drag-to-resize: user grabs a cyan edge and drags → widget
         # emits the proposed BW (already clamped + quantized) → we
         # push it straight into Radio.set_rx_bw for the current mode.

@@ -309,6 +309,9 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # Occasional meteor streaks across the panadapter — independent
         # toggle, default OFF (opt-in flair).
         self._show_meteors: bool = False
+        # Grid lines (9×9 horiz/vert dotted divisions). Default ON;
+        # operator toggle via Settings → Visuals.
+        self._show_grid: bool = True
 
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
@@ -441,6 +444,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
     def set_show_meteors(self, visible: bool) -> None:
         """Toggle occasional meteor streaks across the panadapter."""
         self._show_meteors = bool(visible)
+        self.update()
+
+    def set_show_grid(self, visible: bool) -> None:
+        """Toggle the 9×9 grid divisions on the panadapter."""
+        self._show_grid = bool(visible)
         self.update()
 
     def set_notches(self, notches: list) -> None:
@@ -884,6 +892,10 @@ class SpectrumGpuWidget(QOpenGLWidget):
         Mirrors the original QPainter SpectrumWidget's paint order
         so the visual feel is identical between backends.
         """
+        # Grid — drawn first so the trace and labels sit on top.
+        # Mirrors the CPU widget's order. Toggleable per `_show_grid`.
+        if self._show_grid:
+            self._draw_grid(painter)
         # Lyra constellation watermark — drawn FIRST so passband,
         # marker, notches, and labels all sit on top. Edge-faded so
         # the trace area in the middle of the widget stays clean.
@@ -910,6 +922,29 @@ class SpectrumGpuWidget(QOpenGLWidget):
 
     # ── Axis labels ─────────────────────────────────────────────────
     AXIS_COLOR = QColor(170, 204, 238)  # matches spectrum.py AXIS
+
+    # Grid line color — matches spectrum.py GRID = QColor(40, 60, 80)
+    # so the two backends look identical when grid is enabled.
+    GRID_COLOR = QColor(40, 60, 80)
+
+    def _draw_grid(self, painter: QPainter) -> None:
+        """9×9 dotted grid divisions. Mirrors the CPU widget exactly:
+        9 horizontal lines at y = h*i/10, 9 verticals at x = w*i/10,
+        in muted dark-blue so they recede behind the spectrum trace.
+        Drawn at the very start of the overlay chain so everything
+        else (constellation watermark, passband, trace, markers, labels)
+        sits on top."""
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+        painter.setPen(QPen(self.GRID_COLOR, 1))
+        for i in range(1, 10):
+            y = int(h * i / 10)
+            painter.drawLine(0, y, w, y)
+        for i in range(1, 10):
+            x = int(w * i / 10)
+            painter.drawLine(x, 0, x, h)
 
     def _draw_db_scale_labels(self, painter: QPainter) -> None:
         """dB scale tick labels on the RIGHT edge — '+0', '-10',
