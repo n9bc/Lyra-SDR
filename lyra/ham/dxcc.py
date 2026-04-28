@@ -14,8 +14,8 @@ Usage:
     dxcc = DxccLookup(Path("data/cty.dat"))
     country = dxcc.country_of("JA1XYZ")      # "Japan"
     iso     = dxcc.iso_of("JA1XYZ")          # "JP"
-    flag    = dxcc.flag_of("JA1XYZ")         # "🇯🇵"
-    enriched = dxcc.enrich("N8SDR")          # "🇺🇸 N8SDR"
+    flag    = dxcc.flag_of("JA1XYZ")         # "🇯🇵"  (regional-indicator)
+    enriched = dxcc.enrich("N8SDR")          # "US N8SDR"  (plain text)
 """
 from __future__ import annotations
 
@@ -116,10 +116,19 @@ class DxccLookup:
         return iso_to_flag(self.iso_of(callsign))
 
     def enrich(self, callsign: str) -> str:
-        """Return the callsign prefixed with its flag, or unchanged if
-        no country match. Uses a non-breaking space to keep flag + call
-        as a single label."""
-        flag = self.flag_of(callsign)
-        if flag:
-            return f"{flag} {callsign}"
+        """Return the callsign prefixed with its 2-letter ISO country
+        code (e.g. "US N8SDR", "JA JA1XYZ"), or unchanged if no
+        country match.
+
+        Uses plain text rather than the regional-indicator pair from
+        flag_of() because the latter renders inconsistently across
+        platforms — Windows shows two letters in boxes (the default
+        Windows emoji font doesn't have proper flag glyphs); macOS
+        and Linux with Noto Color Emoji show real flags. Plain text
+        ISO codes give the same country context with consistent
+        rendering everywhere and don't need an emoji fallback in
+        the spot widget's font chain."""
+        iso = self.iso_of(callsign)
+        if iso:
+            return f"{iso} {callsign}"
         return callsign
