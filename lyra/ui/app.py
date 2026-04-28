@@ -1597,34 +1597,46 @@ class MainWindow(QMainWindow):
             └──────────────────────────┴────────┘
             [ central panadapter / waterfall ]
 
-        Sequence chosen so Qt's QSplitter nesting produces left- and
-        right-column groups: build the top row first (band|tuning|
-        meters), then split the meters cell vertically to add view
-        below it (right column established), then split band
-        vertically to drop mode below it, and split mode again to
-        add dsp. Qt nests the vertical splits inside the band cell's
-        column container — and because the band cell's container is
-        what determines the column boundary, mode and dsp inherit
-        the band+tuning width."""
+        Build sequence matters because Qt's splitDockWidget nests
+        splitters inside whatever container the target dock is in.
+        Wrong order gives mode/dsp under just the band column instead
+        of spanning band+tuning width.
+
+        Correct order:
+          1. Outer horizontal split: band | meters (establishes the
+             two top-level column blocks).
+          2. Right block vertical: meters / view (right column has
+             two rows; column boundary now fixed).
+          3. Left block vertical stack: band / mode / dsp (three rows
+             stacked. Each row's width = full left block width because
+             the splits happen at the outer block level.)
+          4. ONLY NOW split band horizontally to insert tuning beside
+             it — this splits just the top-left CELL, so band|tuning
+             share that row but mode/dsp below remain full left width.
+        """
         for dock in self.docks.values():
             self.removeDockWidget(dock)
             dock.setFloating(False)
             dock.setVisible(True)
-        # Top row: band | tuning | meters
+        # Step 1: outer two-column split. band on left, meters on right.
         self.addDockWidget(Qt.TopDockWidgetArea, self.docks["band"])
         self.splitDockWidget(self.docks["band"],
-                             self.docks["tuning"], Qt.Horizontal)
-        self.splitDockWidget(self.docks["tuning"],
                              self.docks["meters"], Qt.Horizontal)
-        # Right column: view (Display) below meters
+        # Step 2: right column gets view stacked below meters.
         self.splitDockWidget(self.docks["meters"],
                              self.docks["view"], Qt.Vertical)
-        # Left column: mode + filter and dsp + audio stacked below
-        # the band|tuning row
+        # Step 3: left column gets mode and dsp stacked below band.
+        # These splits happen at the LEFT BLOCK level so each row
+        # spans the full left-block width.
         self.splitDockWidget(self.docks["band"],
                              self.docks["mode"], Qt.Vertical)
         self.splitDockWidget(self.docks["mode"],
                              self.docks["dsp"], Qt.Vertical)
+        # Step 4: now split band horizontally to insert tuning. This
+        # splits ONLY the top-left cell — mode and dsp below stay
+        # full-width of the left block.
+        self.splitDockWidget(self.docks["band"],
+                             self.docks["tuning"], Qt.Horizontal)
         for dock in self.docks.values():
             dock.setVisible(True)
         self.statusBar().showMessage(
