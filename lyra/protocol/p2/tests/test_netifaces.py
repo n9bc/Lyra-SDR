@@ -78,7 +78,7 @@ class P2DiscoverFanoutTest(unittest.TestCase):
     def test_p2_fans_out_across_interfaces(self) -> None:
         calls: list[tuple[str, object]] = []
 
-        def fake_one(local_bind, target_ip, timeout_s, attempts):
+        def fake_one(local_bind, target_ip, timeout_s, attempts, **_):
             calls.append((local_bind, target_ip))
             return []
 

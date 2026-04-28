@@ -71,6 +71,7 @@ def discover_all(
     attempts: int = 2,
     local_bind: str = "0.0.0.0",
     target_ip: Optional[str] = None,
+    debug_log: Optional[list] = None,
 ) -> List[DiscoveredRadio]:
     """Run P1 and P2 discovery and return the merged results.
 
@@ -82,19 +83,42 @@ def discover_all(
     If a single physical radio replies to both protocols (theoretically
     possible if firmware supports both), the P2 entry wins. P2 is
     strictly newer and we'd rather drive newer protocol code paths.
+
+    `debug_log`, if supplied, accumulates per-protocol diagnostic
+    strings (prefixed with [P1]/[P2]) so operator-facing tools (the
+    Network Discovery Probe dialog, console-print fallbacks) can show
+    exactly which interfaces were tried and what came back.
     """
+    def _tag(prefix: str) -> Optional[list]:
+        if debug_log is None:
+            return None
+        proxy: list = []
+        # Append back to the caller's log with a [P1]/[P2] tag so a
+        # combined transcript stays readable.
+        debug_log.append(f"--- {prefix} discovery ---")
+        return proxy
+
+    p1_log = _tag("P1")
     p1 = _p1.discover(
         timeout_s=timeout_s,
         attempts=attempts,
         local_bind=local_bind,
         target_ip=target_ip,
+        debug_log=p1_log,
     )
+    if debug_log is not None and p1_log is not None:
+        debug_log.extend(f"[P1] {line}" for line in p1_log)
+
+    p2_log = _tag("P2")
     p2 = _p2.discover(
         timeout_s=timeout_s,
         attempts=attempts,
         local_bind=local_bind,
         target_ip=target_ip,
+        debug_log=p2_log,
     )
+    if debug_log is not None and p2_log is not None:
+        debug_log.extend(f"[P2] {line}" for line in p2_log)
 
     by_mac: dict[str, DiscoveredRadio] = {}
     for info in p1:

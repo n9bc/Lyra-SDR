@@ -2913,8 +2913,15 @@ class Radio(QObject):
         Sets `self._protocol` to "P1" or "P2" so the next start() routes
         through the right stream class and skips HL2-only feature paths
         (telemetry decode, AK4951 audio out, OC C&C) when on P2.
+
+        Per-interface diagnostic lines are pumped to the console so
+        tester bug reports include exactly which NICs were tried and
+        what came back, without needing to re-run via the probe dialog.
         """
-        radios = discover_all(timeout_s=1.0, attempts=2)
+        log: list[str] = []
+        radios = discover_all(timeout_s=1.0, attempts=2, debug_log=log)
+        for line in log:
+            print(f"[discover] {line}")
         if not radios:
             self.status_message.emit(
                 "No radios found. Try Help → Network Discovery Probe "
