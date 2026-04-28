@@ -156,31 +156,41 @@ def _discover_on(
     target_ip: Optional[str],
     timeout_s: float,
     attempts: int,
+    debug_log: Optional[list] = None,
 ) -> List[P2RadioInfo]:
     """Run P2 discovery from a single bound interface. Internal helper."""
     found: dict[str, P2RadioInfo] = {}
+
+    def _log(msg: str) -> None:
+        if debug_log is not None:
+            debug_log.append(msg)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind((local_bind, 0))
-    except OSError:
+    except OSError as e:
+        _log(f"  could NOT bind to {local_bind}: {e}")
         sock.close()
         return []
+    _log(f"  socket bound to {local_bind}:{sock.getsockname()[1]}")
     sock.settimeout(0.1)
 
     packet = _build_discovery_packet()
     destination = target_ip if target_ip else "255.255.255.255"
 
     try:
-        for _ in range(attempts):
+        for attempt in range(attempts):
+            _log(f"  attempt {attempt + 1}/{attempts}: send to "
+                 f"{destination}:{DISCOVERY_PORT}")
             try:
                 sock.sendto(packet, (destination, DISCOVERY_PORT))
-            except OSError:
+            except OSError as e:
                 # Some NIC + OS combos refuse broadcast on a particular
                 # bind IP (e.g. 169.254 link-local). Skip — the rest of
                 # the fan-out still covers the radio.
+                _log(f"    send failed: {e}")
                 break
             deadline = time.monotonic() + timeout_s
             while time.monotonic() < deadline:
@@ -196,6 +206,8 @@ def _discover_on(
                 info = _parse_reply(data, addr[0])
                 if info and info.mac not in found:
                     found[info.mac] = info
+                    _log(f"    reply from {addr[0]}: MAC={info.mac} "
+                         f"board={info.board_name}")
     finally:
         sock.close()
 
@@ -205,17 +217,30 @@ def _discover_on(
 def _discover_all_interfaces(
     timeout_s: float,
     attempts: int,
+    debug_log: Optional[list] = None,
 ) -> List[P2RadioInfo]:
     """Broadcast in parallel from every local IPv4 NIC, merge by MAC."""
     addrs = local_ipv4_addresses()
-    if len(addrs) == 1:
-        return _discover_on(addrs[0], None, timeout_s, attempts)
+    if debug_log is not None:
+        debug_log.append(
+            f"Mode: broadcast on {len(addrs)} local interface(s):"
+            f" {', '.join(addrs)}"
+        )
 
+    if len(addrs) == 1:
+        return _discover_on(
+            addrs[0], None, timeout_s, attempts, debug_log=debug_log)
+
+    # Each thread accumulates into its OWN log list — sharing a single
+    # `debug_log` would intermix lines from concurrent interfaces.
     per_iface: list[List[P2RadioInfo]] = [[] for _ in addrs]
+    per_iface_logs: list[list[str]] = [[] for _ in addrs]
     threads: list[threading.Thread] = []
 
     def runner(idx: int, ip: str) -> None:
-        per_iface[idx] = _discover_on(ip, None, timeout_s, attempts)
+        sub_log = per_iface_logs[idx] if debug_log is not None else None
+        per_iface[idx] = _discover_on(
+            ip, None, timeout_s, attempts, debug_log=sub_log)
 
     for i, ip in enumerate(addrs):
         t = threading.Thread(target=runner, args=(i, ip), daemon=True)
@@ -223,6 +248,11 @@ def _discover_all_interfaces(
         t.start()
     for t in threads:
         t.join(timeout=timeout_s * (attempts + 1))
+
+    if debug_log is not None:
+        for ip, sub in zip(addrs, per_iface_logs):
+            debug_log.append(f"interface {ip}:")
+            debug_log.extend(sub)
 
     by_mac: dict[str, P2RadioInfo] = {}
     for batch in per_iface:
@@ -237,6 +267,7 @@ def discover(
     attempts: int = 2,
     local_bind: str = "0.0.0.0",
     target_ip: Optional[str] = None,
+    debug_log: Optional[list] = None,
 ) -> List[P2RadioInfo]:
     """Send a P2 discovery and collect replies.
 
@@ -257,13 +288,24 @@ def discover(
             broadcasting 255.255.255.255. Useful when the radio has a
             fixed IP and broadcast is suppressed by the network. Always
             uses a single socket regardless of ``local_bind``.
+        debug_log: optional list to append diagnostic strings into. Used
+            by the Network Discovery Probe dialog (and Radio.discover's
+            console fallback) to surface per-interface bind / send /
+            reply trace lines to the operator.
 
     Returns:
         One P2RadioInfo per unique MAC that replied.
     """
     if local_bind == "0.0.0.0" and target_ip is None:
-        return _discover_all_interfaces(timeout_s, attempts)
-    return _discover_on(local_bind, target_ip, timeout_s, attempts)
+        return _discover_all_interfaces(timeout_s, attempts, debug_log=debug_log)
+    if debug_log is not None:
+        if target_ip:
+            debug_log.append(f"Mode: unicast to {target_ip}")
+        else:
+            debug_log.append(
+                f"Mode: broadcast from operator-specified bind IP {local_bind}")
+    return _discover_on(local_bind, target_ip, timeout_s, attempts,
+                        debug_log=debug_log)
 
 
 if __name__ == "__main__":
