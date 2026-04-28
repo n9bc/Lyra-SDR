@@ -2860,7 +2860,22 @@ class Radio(QObject):
             # AGC disabled — AF Gain + Volume scale the raw demod
             # output. Critical for digital modes (FT8/FT4/RTTY)
             # where operators intentionally run AGC off.
-            out = audio * vol
+            #
+            # Apply a fixed +14 dB makeup gain to compensate for
+            # the absence of AGC's automatic amplification stage.
+            # Field test on AM/SSB with weak signals showed demod
+            # outputs around -94 dBFS, where AGC ON's typical gain
+            # (~5x = +14 dB) made signals audible while AGC OFF at
+            # the same AF+Vol was 14 dB quieter. Matching the
+            # "only a slight loudness delta" promise from the chain
+            # design comment requires this constant compensation —
+            # without it, operators have to re-dial AF and Vol every
+            # time they toggle AGC. tanh limiter still prevents
+            # over-driving the sink on strong signals; digital-mode
+            # operators feeding a decoder can simply lower AF Gain
+            # by ~14 dB to get the previous (uncompensated) level.
+            AGC_OFF_MAKEUP = 5.0119   # 10 ** (14/20) — +14 dB linear
+            out = audio * AGC_OFF_MAKEUP * vol
             return np.tanh(out).astype(np.float32)
 
         block_peak = float(np.max(np.abs(audio))) if audio.size else 0.0
