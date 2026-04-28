@@ -1,11 +1,12 @@
 # Lyra — Qt6 SDR Transceiver for Hermes Lite 2 / 2+
 
-**Current version: 0.0.4 — "Discovery & Scale Polish"** *(2026-04-26)*
+**Current version: 0.0.5 — "Listening Tools"**
 
 Modern PySide6 desktop SDR for Steve Haynal's Hermes Lite 2 and HL2+.
 Native Python HPSDR Protocol 1, TCI v1.9 server, glassy UI with
 analog-look meters, a band-plan overlay with landmark click-to-tune,
-and per-notch cut-depth visualization on the panadapter.
+GPU-accelerated panadapter + waterfall, and a CW-focused audio
+toolkit (APF audio peaking filter + BIN binaural pseudo-stereo).
 
 ![Lyra](assets/logo/Lyra-SDR.png)
 
@@ -25,29 +26,104 @@ The version string above is the single source of truth maintained in
 Bumping the version is a one-line edit in `lyra/__init__.py`; every
 display surface follows automatically.
 
-## What's in 0.0.4 — "Discovery & Scale Polish"
+## What's in 0.0.5 — "Listening Tools"
 
-A focused follow-up to the first tester build. Bug fixes and behavior
-refinements driven by real tester feedback:
+A meaningful audio-DSP and panadapter release driven by extended
+field testing on the operator's HL2+. Two new CW DSP tools, full
+GPU panadapter feature parity, an audio chain rebuild that fixes
+several long-standing stability issues, and an auto-update check
+so testers don't get stranded on old builds.
+
+### New listening tools
+
+- **APF — Audio Peaking Filter (CW)** — narrow peaking biquad
+  centered on the operator's CW pitch. Boosts weak CW tones above
+  the noise floor without the ringing tail of a brick-wall narrow
+  filter. Right-click for BW/Gain quick presets. CW-only (button
+  preserved across mode switches but only audibly affects CWU/CWL).
+- **BIN — Binaural pseudo-stereo (headphones)** — Hilbert phase
+  split puts the audio "in the middle of the head" for spatial CW
+  perception and SSB voice widening. Adjustable depth 0–100 %, equal
+  loudness normalized. Works on all modes.
+
+### GPU panadapter — full feature parity (BETA)
+
+Everything the QPainter widget does, now on the GPU:
+- Band plan overlay (sub-band segments + landmark click-to-tune)
+- Peak markers (line / dots / triangles, optional dB readout)
+- DX/contest spots with multi-row collision packing + age-fade
+- Notch markers, drag-to-resize, right-click menu
+- Click-to-tune, Y-axis drag, wheel zoom, RX-BW edge drag
+- Passband overlay, noise-floor reference, VFO marker, CW Zero line
+- Grid toggle (operator preference)
+
+GPU mode is opt-in via Settings → Visuals → Graphics backend.
+Testers should compare against the QPainter backend to validate
+parity on their GPU.
+
+### Audio chain rebuild
+
+- **AGC profiles recalibrated** — Fast/Med/Slow release time
+  constants were ~20× too slow (audio stayed clamped for many
+  seconds after a peak). Retuned to standard SDR-client conventions:
+  Fast τ≈120 ms / hang 130 ms, Med τ≈250 ms / hang 0, Slow τ≈500 ms /
+  hang 1 s.
+- **AGC OFF audibility** — was 14 dB quieter than AGC ON because
+  AGC's typical gain (~5×) wasn't compensated. Fixed with a constant
+  +14 dB makeup so toggling AGC produces only a slight loudness
+  delta as the chain design intended.
+- **Mode = Tone hang** — the test-tone generator was producing
+  samples at IQ rate (192k) but feeding a 48k sink, causing
+  back-pressure → GUI lockup on output swap. Fixed.
+- **Audio output rate-sticky bug** — switching between AK4951 and
+  PC Soundcard could lock the audio path until rate cycle. Fixed.
+- **WWV ↔ FT8 stuck audio** — big freq/mode jumps could leave audio
+  silent until rate cycle. Root cause was C&C register staleness;
+  fixed with round-robin keepalive at the protocol layer.
+
+### S-meter overhaul
+
+- **LNA-invariant S-meter** — moving the LNA slider no longer
+  changes meter reading (matches the operator-set S9 calibration
+  point). dBFS → dBm conversion subtracts LNA gain from the raw
+  level so the S-meter shows actual antenna signal strength.
+- **Auto-LNA pull-up** — opt-in. Auto button now optionally raises
+  LNA when the band is sustained-quiet, in addition to the existing
+  back-off-on-clipping behavior. Two-tier ceiling (+24 dB on quiet
+  bands, +15 dB when passband signal is present) plus a passband
+  margin gate keep it out of the IMD zone.
+
+### Other refinements
+
+- **Spot prefixes** — switched from regional-indicator emoji flags
+  (Windows can't render them) to plain-text 2-letter ISO codes.
+  Spot boxes now show e.g. "US N8SDR" or "JA JA1XYZ" with consistent
+  rendering on every platform.
+- **Settings → DSP → CW group** — pitch + APF + BIN settings live
+  here together (renamed from "CW pitch").
+- **Auto-update check on startup** — silent background check of the
+  GitHub releases API. If a newer Lyra is published, the operator
+  sees a status-bar message and a "🆕 Update available" badge on
+  the Help menu's Check for Updates entry.
+
+See the in-app User Guide (F1) for the full APF and BIN topic
+docs, plus updated AGC, audio, and spectrum coverage.
+
+## What was in 0.0.4 — "Discovery & Scale Polish"
 
 - **Auto-scale = clamp, not disable** — dragging the dB-range scale
-  on the spectrum no longer turns auto-scale OFF. Manual range becomes
-  the BOUNDS that auto-scale stays inside.
+  on the spectrum no longer turns auto-scale OFF. Manual range
+  becomes the BOUNDS that auto-scale stays inside.
 - **Per-band scale memory** — each band remembers its own scale
-  bounds, with sensible factory defaults (160 m bottom-heavy, 6 m
-  top-heavy) so band-swapping just works.
-- **Multi-NIC discovery fix** — auto-discover now broadcasts on every
-  local network interface in parallel. Fixes the "tester with Wi-Fi +
-  Ethernet couldn't find the HL2" failure mode.
-- **Help → Network Discovery Probe** — new operator-facing diagnostic
-  dialog. Lists local interfaces, runs broadcast/unicast probes, full
-  debug log + copy-to-clipboard for bug reports.
-- **OpenGL upgrade nag actually appears** — the suggestion popup that
-  was supposed to nudge testers toward OpenGL was getting hidden
-  behind the main window on slow boots. Fixed.
-
-See `docs/help/troubleshooting.md` for an updated discovery troubleshooting
-flow, and `docs/help/spectrum.md` for the new auto-scale behavior.
+  bounds, with sensible factory defaults (160 m bottom-heavy,
+  6 m top-heavy) so band-swapping just works.
+- **Multi-NIC discovery fix** — auto-discover broadcasts on every
+  local network interface in parallel. Fixes the "tester with
+  Wi-Fi + Ethernet couldn't find the HL2" failure mode.
+- **Help → Network Discovery Probe** — diagnostic dialog with
+  per-interface probes and a copy-to-clipboard log.
+- **OpenGL upgrade nag** — fixed timing so the suggestion popup
+  isn't hidden behind the main window on slow boots.
 
 ## What was in 0.0.3 — "First Tester Build"
 

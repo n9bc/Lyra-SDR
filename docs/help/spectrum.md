@@ -376,34 +376,27 @@ single `glTexSubImage2D` upload, no buffer scrolling. The result:
 the panadapter feels smoother than even the OpenGL-accelerated
 QPainter version on the same hardware.
 
-**What works today** (BETA):
+**What works in v0.0.5** (full feature parity with the QPainter widget):
 
-- Trace + waterfall render correctly with full color palette
-- All Settings → Visuals controls that affect data (dB ranges,
-  trace color, palette) work live
-- Operator can switch backends with a Settings restart, no other
-  setup needed
-
-**What's missing in v0.0.5 BETA** (each lands in successive releases):
-
-- VFO marker (vertical line at tuned frequency)
+- Trace + waterfall render with full color palette + live Settings
+- VFO marker, CW Zero reference line
 - Click-to-tune on the trace and waterfall
-- Right-click context menu (notch quick-add)
+- Right-click context menu (notch quick-add, etc.)
 - Wheel-to-zoom on empty spectrum
 - Y-axis drag to set the spectrum dB range
 - Passband overlay (cyan rectangle showing RX filter window)
 - RX-BW resize via dragging the passband edges
 - Notch markers + drag-to-resize-width + right-click menu
-- Spot markers (callsign boxes)
-- Band-plan strip (CW/DIG/SSB segments + landmark triangles)
-- Peak-hold markers
+- Spot markers (callsign boxes with multi-row collision packing
+  and age-fade)
+- Band-plan strip (CW/DIG/SSB segments + landmark click-to-tune
+  triangles + red dashed band-edge warnings)
+- Peak-hold markers (line / dots / triangles, optional dB readout)
 - Noise-floor reference line
+- Grid toggle (operator preference)
 
-If any of these features matter to your daily operation, **stay on
-"OpenGL — accelerated QPainter"** until the BETA reaches feature
-parity. The QPainter widget will remain available indefinitely as
-the safety-net fallback even after the GPU widget becomes the
-recommended default.
+The QPainter widget remains available indefinitely as the safety-net
+fallback. Switch backends in **Settings → Visuals → Graphics backend**.
 
 **System requirements:** the GPU panadapter needs an OpenGL 4.3
 core profile context. That covers every NVIDIA / AMD / Intel GPU
