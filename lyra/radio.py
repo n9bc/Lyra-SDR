@@ -348,6 +348,12 @@ class Radio(QObject):
         # consecutive ticks of "quiet" — keeps the loop from chasing
         # gaps between band activity.
         self._lna_pullup_quiet_streak = 0
+        # Passband peak in dBFS — captured by the FFT loop so the
+        # pull-up gate can reject "strong narrowband signal in your
+        # filter" cases that full-IQ peak/RMS doesn't see (e.g. WWV
+        # at 10 MHz in a 192 kHz IQ stream — 1.6% of the band).
+        # None means "FFT hasn't run yet"; treat as no information.
+        self._lna_passband_peak_dbfs: float | None = None
         self._rx_bw_by_mode = dict(self.BW_DEFAULTS)
         self._tx_bw_by_mode = dict(self.BW_DEFAULTS)
         self._bw_locked = False
@@ -969,6 +975,16 @@ class Radio(QObject):
     # detection deliberately avoids the v1 trap of chasing peaks.
     LNA_AUTO_QUIET_RMS_DBFS = -50.0
     LNA_AUTO_QUIET_PEAK_DBFS = -25.0
+    # Passband-aware gate: pull-up bails if the demod passband peak
+    # sticks out above the noise floor by more than this margin —
+    # i.e. there's a real signal in your filter that you're listening
+    # to, even if the rest of the 192 kHz band is quiet (RMS-wise).
+    # Without this gate, a strong narrowband signal like WWV at 10 MHz
+    # (a few kHz wide in a 192 kHz IQ stream) doesn't budge the
+    # full-band RMS / peak metrics, so pull-up climbs and pushes the
+    # AD9866 PGA toward its compression knee — producing AGC pumping
+    # / pulsing-spectrum / chopped audio.
+    LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB = 10.0
     # Sustained-quiet streak in ticks (1.5 s each). 5 ticks ≈ 7.5 s
     # — long enough to ride out gaps between QSOs without climbing.
     LNA_AUTO_PULLUP_QUIET_TICKS = 5
@@ -1547,14 +1563,30 @@ class Radio(QObject):
             step = -2
             reason = "back-off"
         else:
-            # ── Pull-up branch (opt-in, bidirectional Auto-LNA) ──
-            # Reaches here only when the band is healthy from the
-            # back-off perspective. If pull-up is enabled AND the
-            # band has been sustained-quiet, climb 1 dB.
-            if self._lna_auto_pullup:
-                step, reason = self._evaluate_pullup(peak_dbfs)
-            if step == 0:
-                return   # nothing to do — healthy, no climb warranted
+            # Passband-signal back-off — if pull-up has driven LNA
+            # high AND there's now a strong passband signal driving
+            # the AD9866 PGA toward its compression knee, drop gain
+            # even though the full-IQ peak is still cool. Catches
+            # the WWV-arrives-at-+24-LNA case automatically when
+            # pull-up is on; harmless in static manual-LNA setups
+            # because gain is already where the user put it.
+            pb_peak = self._lna_passband_peak_dbfs
+            nf_db = self._noise_floor_db
+            if (self._lna_auto_pullup
+                    and self._gain_db > 12
+                    and pb_peak is not None and nf_db is not None
+                    and (pb_peak - nf_db) > 25.0):
+                step = -2
+                reason = "back-off (strong passband)"
+            else:
+                # ── Pull-up branch (opt-in, bidirectional Auto-LNA) ──
+                # Reaches here only when the band is healthy from the
+                # back-off perspective. If pull-up is enabled AND the
+                # band has been sustained-quiet, climb 1 dB.
+                if self._lna_auto_pullup:
+                    step, reason = self._evaluate_pullup(peak_dbfs)
+                if step == 0:
+                    return   # nothing to do — healthy, no climb warranted
 
         new_db = max(self.LNA_MIN_DB,
                      min(self.LNA_MAX_DB, self._gain_db + step))
@@ -1639,6 +1671,20 @@ class Radio(QObject):
             return 0, ""
         rms_max_dbfs = 20.0 * float(np.log10(rms_max_lin))
         if rms_max_dbfs >= self.LNA_AUTO_QUIET_RMS_DBFS:
+            self._lna_pullup_quiet_streak = 0
+            return 0, ""
+        # Passband-signal gate — the critical fix for WWV-style
+        # strong narrowband carriers that don't move full-IQ peak
+        # or RMS but DO drive the AD9866 PGA into compression at
+        # high LNA. If the demod passband's strongest bin sits
+        # more than LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB above the
+        # current noise floor, there's real signal in the filter
+        # the operator is listening to — refuse to climb.
+        pb_peak = self._lna_passband_peak_dbfs
+        nf_db = self._noise_floor_db
+        if (pb_peak is not None and nf_db is not None
+                and (pb_peak - nf_db)
+                    > self.LNA_AUTO_PULLUP_PASSBAND_MARGIN_DB):
             self._lna_pullup_quiet_streak = 0
             return 0, ""
         # All gates passed for this tick — accumulate streak
@@ -3010,6 +3056,12 @@ class Radio(QObject):
             # absolute offset.
             lin = 10.0 ** (band / 10.0)            # dB → linear power
             total_lin = float(np.sum(lin))
+            # Cache passband peak (max bin in dBFS) for Auto-LNA
+            # pull-up's passband-signal gate. Use the unsmoothed
+            # spectrum so the gate reacts to real signal arrivals
+            # within one FFT (~150 ms) rather than waiting for
+            # smeter EWMA to catch up.
+            self._lna_passband_peak_dbfs = float(np.max(band))
             if self._smeter_mode == "avg":
                 if self._smeter_avg_lin <= 0.0:
                     self._smeter_avg_lin = total_lin

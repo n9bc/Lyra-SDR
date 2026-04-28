@@ -123,9 +123,21 @@ bands without having to ride the slider yourself.
 |---|---|
 | RMS over recent window | < −50 dBFS |
 | Peak over recent window | < −25 dBFS |
+| Passband peak above noise floor | < +10 dB |
 | Sustained-quiet streak | 5 consecutive ticks (~7.5 s) |
 | Time since last manual gain change | > 5 s |
 | Current LNA gain | < +24 dB (auto soft ceiling) |
+
+The **passband-peak gate** is the critical one for narrowband-strong
+signals like WWV. A WWV carrier at 10 MHz only occupies a few kHz
+out of the 192 kHz IQ stream, so it barely moves full-band peak or
+RMS — but it's what your ear is locked onto. If the strongest bin
+inside your demod filter is more than 10 dB above the noise floor,
+pull-up refuses to climb regardless of how quiet the rest of the
+band looks. The same comparison also drives an additional
+**back-off trigger** when LNA is already above +12 dB and a strong
+passband signal arrives mid-tune — the loop will drop 2 dB even if
+the full-band peak is still cool.
 
 When all gates pass, Auto climbs by **+1 dB**. The next tick
 re-evaluates from the new gain. Down-steps stay aggressive (2–3
