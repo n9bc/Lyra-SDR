@@ -202,6 +202,11 @@ class SpectrumGpuWidget(QOpenGLWidget):
     # clamped + quantized). Panel forwards to radio.set_rx_bw.
     passband_edge_drag = Signal(int)
 
+    # Band-plan landmark click — payload is (freq_hz, mode). Panel
+    # routes to set_freq_hz + set_mode so a click on FT8/FT4/WSPR
+    # triangles tunes the radio and switches mode in one shot.
+    landmark_clicked = Signal(int, str)
+
     # Width of the right-edge strip that grabs dB-scale drag instead
     # of click-to-tune. Matches the QPainter widget's value.
     DB_SCALE_ZONE_PX = 50
@@ -328,9 +333,34 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # the band-plan strip (segment colors + landmark triangles).
         # Spot row 0 sits BELOW this offset so callsign boxes don't
         # paint over the band-plan visuals. 0 when band plan is
-        # off (or not yet ported to GPU). Will be set by the band
-        # plan port; for now it stays 0.
+        # off. Recomputed in _draw_band_plan each frame.
         self._band_plan_reserved_px: int = 0
+
+        # ── Band-plan overlay state ───────────────────────────────
+        # Same toggles as the CPU widget. NONE = no overlay drawn.
+        self._band_plan_region: str = "NONE"
+        self._show_band_segments: bool = True
+        self._show_band_landmarks: bool = True
+        self._show_band_edge_warn: bool = True
+        # Per-segment color overrides (CW/DIG/SSB/FM) layered on top
+        # of band_plan.SEGMENT_COLORS at paint time.
+        self._user_segment_colors: dict[str, str] = {}
+        # Cache of the landmarks rendered this frame, used by the
+        # mouse-press handler to dispatch click-to-tune on triangles.
+        # Tuples of (freq_hz, mode, x_px, y_top, y_bot).
+        self._landmark_hit_cache: list[tuple[int, str, int, int, int]] = []
+
+        # ── Peak-markers overlay state ────────────────────────────
+        # In-passband peak-hold trace — same buffer shape as the live
+        # spec_db, decayed at peak_markers_decay_dbps and clamped up
+        # to the live values each frame. Disabled by default.
+        self._peak_markers_enabled: bool = False
+        self._peak_markers_decay_dbps: float = 10.0
+        self._peak_markers_style: str = "dots"   # "line" / "dots" / "triangles"
+        self._peak_markers_show_db: bool = False
+        self._user_peak_color: str = ""
+        self._peak_hold_db: Optional[np.ndarray] = None
+        self._peak_last_ts: Optional[float] = None
 
         # Notch markers (Phase B.13). Each entry is
         # (abs_freq_hz, width_hz, active, deep). Updated from
@@ -381,6 +411,24 @@ class SpectrumGpuWidget(QOpenGLWidget):
         # current (min, max) to compute proposed deltas from.
         self._min_db = float(min_db)
         self._max_db = float(max_db)
+        # Peak-hold buffer maintenance — same algo as the CPU
+        # widget: linear dB/sec decay, then clamp-up to the live
+        # spectrum so peaks can never sit below current signal.
+        # Use the truncated `n`-prefix so the buffer always matches
+        # what the GL trace will draw.
+        if self._peak_markers_enabled:
+            spec_view = spec_db[:n].astype(np.float32, copy=False)
+            now = time.monotonic()
+            if (self._peak_hold_db is None
+                    or self._peak_hold_db.shape != spec_view.shape):
+                self._peak_hold_db = spec_view.copy()
+                self._peak_last_ts = now
+            else:
+                dt = max(0.005, now - (self._peak_last_ts or now))
+                self._peak_last_ts = now
+                self._peak_hold_db -= self._peak_markers_decay_dbps * dt
+                np.maximum(self._peak_hold_db, spec_view,
+                           out=self._peak_hold_db)
         # Map bins → NDC.x: linear from -1 (left) to +1 (right).
         xs = np.linspace(-1.0, 1.0, n, dtype=np.float32)
         # Map dB → NDC.y: linear from -1 (bottom = min_db) to +1
@@ -470,6 +518,66 @@ class SpectrumGpuWidget(QOpenGLWidget):
         self._show_grid = bool(visible)
         self.update()
 
+    # ── Band-plan overlay API (mirrors the CPU widget) ─────────────
+    def set_band_plan_region(self, region_id: str) -> None:
+        """Active region id for the band-plan overlay. 'NONE' hides
+        the overlay entirely."""
+        self._band_plan_region = str(region_id) or "NONE"
+        self.update()
+
+    def set_band_plan_show_segments(self, on: bool) -> None:
+        """Toggle the colored sub-band segment strip (top of widget)."""
+        self._show_band_segments = bool(on)
+        self.update()
+
+    def set_band_plan_show_landmarks(self, on: bool) -> None:
+        """Toggle the landmark triangles strip (FT8/FT4/WSPR/etc.)."""
+        self._show_band_landmarks = bool(on)
+        self.update()
+
+    def set_band_plan_show_edge_warn(self, on: bool) -> None:
+        """Toggle the red dashed band-edge warning line."""
+        self._show_band_edge_warn = bool(on)
+        self.update()
+
+    def set_segment_color_overrides(self, overrides: dict) -> None:
+        """Merge a {kind: hex} dict of per-segment color overrides
+        (CW / DIG / SSB / FM). Absent keys use band_plan defaults."""
+        self._user_segment_colors = {
+            str(k).upper(): str(v)
+            for k, v in dict(overrides or {}).items() if v}
+        self.update()
+
+    # ── Peak-markers API (mirrors the CPU widget) ──────────────────
+    def set_peak_markers_enabled(self, on: bool) -> None:
+        """Toggle the in-passband peak-hold overlay. Disabling clears
+        the buffer so a later re-enable starts clean."""
+        self._peak_markers_enabled = bool(on)
+        if not self._peak_markers_enabled:
+            self._peak_hold_db = None
+            self._peak_last_ts = None
+        self.update()
+
+    def set_peak_markers_decay_dbps(self, dbps: float) -> None:
+        self._peak_markers_decay_dbps = float(dbps)
+
+    def set_peak_markers_style(self, name: str) -> None:
+        name = (name or "dots").strip().lower()
+        if name not in ("line", "dots", "triangles"):
+            name = "dots"
+        self._peak_markers_style = name
+        self.update()
+
+    def set_peak_markers_show_db(self, on: bool) -> None:
+        self._peak_markers_show_db = bool(on)
+        self.update()
+
+    def set_peak_markers_color(self, hex_str: str) -> None:
+        """Override the peak-marker color. Empty string reverts to
+        the default warm amber."""
+        self._user_peak_color = str(hex_str or "")
+        self.update()
+
     def set_spots(self, spots: list) -> None:
         """Set the spot list. Each entry is a dict with keys:
         freq_hz, mode, call/display, ts (monotonic), color (0xAARRGGBB).
@@ -513,6 +621,23 @@ class SpectrumGpuWidget(QOpenGLWidget):
         radio.notches_changed."""
         self._notches = list(notches) if notches else []
         self.update()
+
+    # ── Landmark hit-test (band-plan click-to-tune) ────────────────
+    def _landmark_at(self, x: float, y: float):
+        """Return (freq_hz, mode) if (x,y) hits a landmark triangle,
+        else None. Cache is rebuilt every paint by `_draw_band_plan`,
+        so the geometry is always the most recent frame's. ±5 px of
+        slop on x so triangles stay grabbable at small sizes."""
+        if (self._band_plan_region == "NONE"
+                or not self._show_band_landmarks
+                or not self._landmark_hit_cache):
+            return None
+        for freq, mode, mx, y_top, y_bot in self._landmark_hit_cache:
+            # Allow a tiny bit of slack below the triangle so the
+            # operator doesn't have to thread the eye of a needle.
+            if abs(x - mx) <= 5 and y_top - 1 <= y <= y_bot + 2:
+                return (freq, mode)
+        return None
 
     # ── Notch hit-test (Phase B.14) ────────────────────────────────
     def _notch_at_x(self, x: int) -> Optional[float]:
@@ -623,6 +748,14 @@ class SpectrumGpuWidget(QOpenGLWidget):
         x = int(event.position().x())
         y = int(event.position().y())
         if event.button() == Qt.LeftButton:
+            # Highest priority: landmark triangle click. The hit cache
+            # was rebuilt on the most recent paint, so the geometry is
+            # current. A click on FT8/FT4/WSPR/etc. tunes + switches
+            # mode in one shot.
+            lm = self._landmark_at(x, y)
+            if lm is not None:
+                self.landmark_clicked.emit(int(lm[0]), str(lm[1]))
+                return
             notch_freq = self._notch_at_x(x)
             if notch_freq is not None:
                 # Press on a notch → enter width-drag mode. Suppress
@@ -964,8 +1097,19 @@ class SpectrumGpuWidget(QOpenGLWidget):
         if self._show_meteors:
             from lyra.ui.constellation import draw_meteors
             draw_meteors(painter, self.width(), self.height())
+        # Band-plan overlay — top-strip segments + landmark triangles
+        # + edge warnings. Drawn BEFORE the trace overlays so the strip
+        # sits at the very top edge but doesn't obscure the trace or
+        # the passband. Sets _band_plan_reserved_px each frame for the
+        # spot packer below to honor.
+        self._draw_band_plan(painter)
         self._draw_passband(painter)
         self._draw_noise_floor(painter)
+        # Peak-hold markers — translucent in-passband overlay drawn
+        # ABOVE the trace (which lives in the GL framebuffer behind
+        # this QPainter pass) so peaks read clearly against the live
+        # spectrum.
+        self._draw_peak_markers(painter)
         self._draw_db_scale_labels(painter)
         self._draw_vfo_marker(painter)
         # CW Zero line drawn AFTER the VFO marker so the white line
@@ -1001,6 +1145,240 @@ class SpectrumGpuWidget(QOpenGLWidget):
         for i in range(1, 10):
             x = int(w * i / 10)
             painter.drawLine(x, 0, x, h)
+
+    # ── Band-plan overlay drawing ──────────────────────────────────
+    # Strip heights — match the CPU widget exactly so the two
+    # backends render the band-plan area at the same vertical scale.
+    BAND_STRIP_H = 10        # colored sub-band segment band
+    LANDMARK_STRIP_H = 12    # landmark triangles + labels
+
+    def _draw_band_plan(self, painter: QPainter) -> None:
+        """Top-of-widget band-plan overlay. Mirrors spectrum.py's
+        QPainter implementation: a colored segment strip, a landmark
+        triangle strip just below, and full-band edge warnings as
+        red dashed verticals that span the full widget height.
+        Updates `_band_plan_reserved_px` each frame so the spot
+        packer below can avoid colliding into the colored strips.
+        Also rebuilds `_landmark_hit_cache` for click-to-tune
+        dispatch in mousePressEvent."""
+        # Reset every frame; populated below if the overlay is active.
+        self._band_plan_reserved_px = 0
+        self._landmark_hit_cache = []
+        if self._band_plan_region == "NONE":
+            return
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0 or self._span_hz <= 0:
+            return
+        from lyra import band_plan as _bp
+        from PySide6.QtGui import QFont, QPolygonF
+        from PySide6.QtCore import QPointF
+
+        hz_per_px = self._span_hz / w
+        center_x = w / 2
+        top_reserve = 0
+
+        # ── Colored sub-band segment strip ────────────────────────
+        if self._show_band_segments:
+            top_reserve += self.BAND_STRIP_H
+            segs = _bp.visible_segments(
+                self._band_plan_region,
+                self._center_hz, self._span_hz)
+            seg_lbl_font = QFont()
+            seg_lbl_font.setPointSize(7)
+            seg_lbl_font.setBold(True)
+            for seg, seg_lo, seg_hi in segs:
+                x0 = int(center_x + (seg_lo - self._center_hz) / hz_per_px)
+                x1 = int(center_x + (seg_hi - self._center_hz) / hz_per_px)
+                x0 = max(0, x0)
+                x1 = min(w, x1)
+                if x1 <= x0:
+                    continue
+                color_hex = (
+                    self._user_segment_colors.get(seg["kind"])
+                    or _bp.SEGMENT_COLORS.get(seg["kind"], "#5c8caa"))
+                col = QColor(color_hex)
+                col.setAlpha(210)
+                painter.fillRect(x0, 0, x1 - x0, self.BAND_STRIP_H, col)
+                if x1 - x0 >= 24:
+                    painter.setPen(QPen(QColor(240, 240, 240, 220), 1))
+                    painter.setFont(seg_lbl_font)
+                    painter.drawText(x0 + 3, self.BAND_STRIP_H - 2,
+                                     seg["label"])
+
+        # ── Landmark triangle strip ───────────────────────────────
+        if self._show_band_landmarks:
+            top_reserve += self.LANDMARK_STRIP_H
+            marks = _bp.visible_landmarks(
+                self._band_plan_region,
+                self._center_hz, self._span_hz)
+            tri_y = (self.BAND_STRIP_H
+                     if self._show_band_segments else 0)
+            lm_font = QFont()
+            lm_font.setPointSize(7)
+            lm_font.setBold(True)
+            painter.setFont(lm_font)
+            for lm in marks:
+                mx = int(center_x +
+                         (lm["freq"] - self._center_hz) / hz_per_px)
+                if not (0 <= mx <= w):
+                    continue
+                # Downward-pointing triangle, identical geometry to
+                # the CPU widget so the landmark hit zone matches.
+                tri = QPolygonF([
+                    QPointF(mx - 4, tri_y + 1),
+                    QPointF(mx + 4, tri_y + 1),
+                    QPointF(mx,     tri_y + 6),
+                ])
+                painter.setPen(QPen(QColor(255, 215, 0, 200), 1))
+                painter.setBrush(QColor(255, 215, 0, 140))
+                painter.drawPolygon(tri)
+                painter.setPen(QPen(QColor(255, 215, 0, 220), 1))
+                painter.drawText(mx + 6,
+                                 tri_y + self.LANDMARK_STRIP_H - 1,
+                                 lm["label"])
+                # Stash for hit-test — the triangle's vertical extent
+                # is roughly tri_y .. tri_y + 6 px.
+                self._landmark_hit_cache.append((
+                    int(lm["freq"]),
+                    str(lm.get("mode", "")),
+                    mx, tri_y, tri_y + 6,
+                ))
+
+        # ── Band-edge warnings ────────────────────────────────────
+        if self._show_band_edge_warn:
+            lo_vis = self._center_hz - self._span_hz / 2
+            hi_vis = self._center_hz + self._span_hz / 2
+            edge_lbl_font = QFont()
+            edge_lbl_font.setPointSize(8)
+            edge_lbl_font.setBold(True)
+            for b in _bp.get_region(self._band_plan_region)["bands"]:
+                for edge_hz in (b["low"], b["high"]):
+                    if not (lo_vis <= edge_hz <= hi_vis):
+                        continue
+                    ex = int(center_x +
+                             (edge_hz - self._center_hz) / hz_per_px)
+                    painter.setPen(QPen(QColor(255, 80, 80, 220), 2,
+                                        Qt.DashLine))
+                    painter.drawLine(ex, 0, ex, h)
+                    painter.setPen(QPen(QColor(255, 120, 120, 220), 1))
+                    painter.setFont(edge_lbl_font)
+                    painter.drawText(ex + 3, h - 22,
+                                     f"{b['name']} EDGE")
+
+        # Publish the reserved height so the spot packer below can
+        # avoid stomping on the segment strip + landmark triangles.
+        self._band_plan_reserved_px = top_reserve
+
+    # ── Peak-markers drawing ───────────────────────────────────────
+    def _draw_peak_markers(self, painter: QPainter) -> None:
+        """In-passband peak-hold overlay. Same algo as the CPU
+        widget: clip x-range to the passband, decimate/interpolate
+        the peak buffer to widget-pixel width, render with the
+        operator-selected style (line/dots/triangles), and
+        optionally label the top-3 peaks. Buffer maintenance lives
+        in set_spectrum so decay tracks frame cadence."""
+        if (not self._peak_markers_enabled
+                or self._peak_hold_db is None
+                or self._passband_hi_hz <= self._passband_lo_hz
+                or self._span_hz <= 0):
+            return
+        w = self.width()
+        h = self.height()
+        if w <= 0 or h <= 0:
+            return
+        span_db = self._max_db - self._min_db
+        if span_db <= 0:
+            return
+        hz_per_px = self._span_hz / w
+        center_x = w / 2
+        pb_x_lo = int(center_x + self._passband_lo_hz / hz_per_px)
+        pb_x_hi = int(center_x + self._passband_hi_hz / hz_per_px)
+        pb_x_lo = max(0, pb_x_lo)
+        pb_x_hi = min(w, pb_x_hi)
+        if pb_x_hi <= pb_x_lo + 2:
+            return
+        # Decimate / interpolate the peak buffer to pixel width — same
+        # mapping as the live trace path so peaks line up bin-for-bin.
+        n_peak = len(self._peak_hold_db)
+        if n_peak >= w:
+            idx = (np.linspace(0, n_peak - 1, w)).astype(np.int32)
+            peak_line = self._peak_hold_db[idx]
+        else:
+            peak_line = np.interp(np.linspace(0, n_peak - 1, w),
+                                  np.arange(n_peak),
+                                  self._peak_hold_db)
+        py = h - ((peak_line - self._min_db) / span_db) * h
+        py = np.clip(py, 0, h - 1)
+
+        # Default warm amber, or the operator's pick.
+        if self._user_peak_color:
+            amber = QColor(self._user_peak_color)
+            amber.setAlpha(230)
+        else:
+            amber = QColor(255, 190, 90, 230)
+        style = self._peak_markers_style
+        if style == "line":
+            painter.setPen(QPen(amber, 1.3))
+            for i in range(pb_x_lo, pb_x_hi - 1):
+                painter.drawLine(i, int(py[i]),
+                                 i + 1, int(py[i + 1]))
+        elif style == "triangles":
+            from PySide6.QtGui import QPolygonF
+            from PySide6.QtCore import QPointF
+            painter.setPen(QPen(amber, 1))
+            painter.setBrush(QColor(255, 190, 90, 200))
+            for i in range(pb_x_lo, pb_x_hi, 4):
+                yi = int(py[i])
+                tri = QPolygonF([
+                    QPointF(i - 3, yi - 4),
+                    QPointF(i + 3, yi - 4),
+                    QPointF(i,     yi),
+                ])
+                painter.drawPolygon(tri)
+        else:  # "dots"
+            from PySide6.QtCore import QPointF
+            painter.setPen(QPen(amber, 1))
+            painter.setBrush(QColor(255, 190, 90, 220))
+            # One dot every 2 px — tight enough to read as a curve at
+            # normal zoom, loose enough to count as discrete marks.
+            for i in range(pb_x_lo, pb_x_hi, 2):
+                painter.drawEllipse(QPointF(float(i), float(py[i])),
+                                    1.8, 1.8)
+
+        # Optional peak-dB readout — top 3 peaks ≥ 6 dB above the
+        # min in the passband, separated by ≥ 16 px so labels
+        # don't crowd each other.
+        if self._peak_markers_show_db and pb_x_hi > pb_x_lo + 10:
+            from PySide6.QtGui import QFont
+            pb_slice = peak_line[pb_x_lo:pb_x_hi]
+            min_in_pb = float(np.min(pb_slice))
+            threshold = min_in_pb + 6.0
+            lbl_font = QFont()
+            lbl_font.setPointSize(7)
+            lbl_font.setBold(True)
+            painter.setFont(lbl_font)
+            painter.setPen(QPen(amber, 1))
+            candidates = []
+            for i in range(1, len(pb_slice) - 1):
+                v = pb_slice[i]
+                if (v > pb_slice[i - 1]
+                        and v >= pb_slice[i + 1]
+                        and v >= threshold):
+                    candidates.append((float(v), i + pb_x_lo))
+            candidates.sort(reverse=True)
+            chosen: list[tuple[float, int]] = []
+            for val, x_peak in candidates:
+                if all(abs(x_peak - xc) >= 16
+                       for _, xc in chosen):
+                    chosen.append((val, x_peak))
+                if len(chosen) >= 3:
+                    break
+            for val, x_peak in chosen:
+                yi = int(h - ((val - self._min_db) / span_db) * h)
+                yi = max(10, yi)
+                painter.drawText(x_peak + 4, yi - 2,
+                                 f"{val:+.0f}")
 
     def _draw_db_scale_labels(self, painter: QPainter) -> None:
         """dB scale tick labels on the RIGHT edge — '+0', '-10',

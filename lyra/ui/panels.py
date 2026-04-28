@@ -2092,24 +2092,14 @@ class SpectrumPanel(GlassPanel):
 
     # ── GPU panadapter (BACKEND_GPU_OPENGL) ────────────────────────
     def _setup_gpu_panadapter(self) -> None:
-        """Phase B.2 minimal wiring for SpectrumGpuWidget. Connects
-        only the signals the GPU widget understands today:
-
-          - spectrum_ready → set_spectrum (with dB range)
-          - spectrum_trace_color_changed → set_trace_color
-
-        DELIBERATELY NOT WIRED (no equivalent on GPU widget yet):
-          - notches, spots, band plan overlay
-          - peak markers, noise floor reference line
-          - passband overlay, RX BW drag
-          - click-to-tune, right-click menu, wheel zoom
-          - Y-axis drag-to-scale, db_scale_drag
-          - landmark click
-
-        These all require shader / overlay extensions to the GPU
-        widget. Tracking them as the Phase B.3+ backlog. Operators
-        on the BETA backend get a fast, clean trace but no
-        interactivity until those land.
+        """Wire SpectrumGpuWidget for production use. The GPU widget
+        is now at feature parity with the QPainter widget for the
+        overlays and interactions that ship today: notches, spots,
+        passband, noise-floor, click-to-tune, right-click menu, wheel
+        zoom, Y-axis drag, RX BW drag, band-plan strip + landmark
+        click-to-tune, and in-passband peak markers. Trace + waterfall
+        are GPU-accelerated; QPainter overlays are layered on top in
+        paintEvent.
         """
         from lyra.ui.spectrum_gpu import SpectrumGpuWidget
         self.widget = SpectrumGpuWidget()
@@ -2187,6 +2177,54 @@ class SpectrumPanel(GlassPanel):
         # current mode.
         self.widget.passband_edge_drag.connect(
             lambda bw: self.radio.set_rx_bw(self.radio.mode, int(bw)))
+        # Band-plan overlay (region + segment / landmark / edge-warn
+        # toggles + per-segment color overrides). 1:1 with the QPainter
+        # widget wiring below — same Radio attributes / signals drive
+        # the GPU widget's setters.
+        self.widget.set_band_plan_region(self.radio.band_plan_region)
+        self.widget.set_band_plan_show_segments(
+            self.radio.band_plan_show_segments)
+        self.widget.set_band_plan_show_landmarks(
+            self.radio.band_plan_show_landmarks)
+        self.widget.set_band_plan_show_edge_warn(
+            self.radio.band_plan_edge_warn)
+        self.widget.set_segment_color_overrides(self.radio.segment_colors)
+        self.radio.band_plan_region_changed.connect(
+            self.widget.set_band_plan_region)
+        self.radio.band_plan_show_segments_changed.connect(
+            self.widget.set_band_plan_show_segments)
+        self.radio.band_plan_show_landmarks_changed.connect(
+            self.widget.set_band_plan_show_landmarks)
+        self.radio.band_plan_edge_warn_changed.connect(
+            self.widget.set_band_plan_show_edge_warn)
+        self.radio.segment_colors_changed.connect(
+            self.widget.set_segment_color_overrides)
+        # Landmark click-to-tune — tune freq + switch mode in one shot.
+        # Reuses the same handler as the QPainter path so behavior is
+        # identical (status_message, etc.).
+        self.widget.landmark_clicked.connect(self._on_landmark_clicked)
+
+        # Peak markers — in-passband peak-hold overlay. Seed every
+        # tunable + subscribe to live changes from Settings → Visuals.
+        self.widget.set_peak_markers_enabled(
+            self.radio.peak_markers_enabled)
+        self.widget.set_peak_markers_decay_dbps(
+            self.radio.peak_markers_decay_dbps)
+        self.widget.set_peak_markers_style(self.radio.peak_markers_style)
+        self.widget.set_peak_markers_show_db(
+            self.radio.peak_markers_show_db)
+        self.widget.set_peak_markers_color(self.radio.peak_markers_color)
+        self.radio.peak_markers_enabled_changed.connect(
+            self.widget.set_peak_markers_enabled)
+        self.radio.peak_markers_decay_changed.connect(
+            self.widget.set_peak_markers_decay_dbps)
+        self.radio.peak_markers_style_changed.connect(
+            self.widget.set_peak_markers_style)
+        self.radio.peak_markers_show_db_changed.connect(
+            self.widget.set_peak_markers_show_db)
+        self.radio.peak_markers_color_changed.connect(
+            self.widget.set_peak_markers_color)
+
         # Trace color — Radio holds the operator's pick; sync it now
         # and on changes.
         self._gpu_apply_trace_color()
