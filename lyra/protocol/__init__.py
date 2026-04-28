@@ -14,6 +14,7 @@ Direct imports (existing callers continue to work unchanged):
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import List, Literal, Optional, Union
 
@@ -75,10 +76,12 @@ def discover_all(
 ) -> List[DiscoveredRadio]:
     """Run P1 and P2 discovery and return the merged results.
 
-    Discoveries are run sequentially (P1, then P2). Both share UDP 1024
-    so the small extra delay is the safer choice over a single combined
-    socket — keeps the parsers cleanly separated and avoids subtle
-    race conditions on the bind.
+    P1 and P2 run **in parallel** on separate threads. Each protocol
+    binds its own ephemeral UDP sockets (different bound source ports),
+    so the radios route their replies back to whichever protocol's
+    socket actually sent the request — there is no contention on UDP
+    1024 itself. Running them in parallel halves the wall-clock wait
+    (was ~5 s sequential, now ~3 s = max(P1, P2)).
 
     If a single physical radio replies to both protocols (theoretically
     possible if firmware supports both), the P2 entry wins. P2 is
@@ -87,44 +90,57 @@ def discover_all(
     `debug_log`, if supplied, accumulates per-protocol diagnostic
     strings (prefixed with [P1]/[P2]) so operator-facing tools (the
     Network Discovery Probe dialog, console-print fallbacks) can show
-    exactly which interfaces were tried and what came back.
+    exactly which interfaces were tried and what came back. Output
+    order is P1-section then P2-section so the transcript stays
+    readable even though the network work happened concurrently.
     """
-    def _tag(prefix: str) -> Optional[list]:
-        if debug_log is None:
-            return None
-        proxy: list = []
-        # Append back to the caller's log with a [P1]/[P2] tag so a
-        # combined transcript stays readable.
-        debug_log.append(f"--- {prefix} discovery ---")
-        return proxy
+    p1_log: Optional[list] = [] if debug_log is not None else None
+    p2_log: Optional[list] = [] if debug_log is not None else None
+    p1_results: list = []
+    p2_results: list = []
 
-    p1_log = _tag("P1")
-    p1 = _p1.discover(
-        timeout_s=timeout_s,
-        attempts=attempts,
-        local_bind=local_bind,
-        target_ip=target_ip,
-        debug_log=p1_log,
-    )
-    if debug_log is not None and p1_log is not None:
-        debug_log.extend(f"[P1] {line}" for line in p1_log)
+    def _run_p1():
+        p1_results.extend(_p1.discover(
+            timeout_s=timeout_s,
+            attempts=attempts,
+            local_bind=local_bind,
+            target_ip=target_ip,
+            debug_log=p1_log,
+        ))
 
-    p2_log = _tag("P2")
-    p2 = _p2.discover(
-        timeout_s=timeout_s,
-        attempts=attempts,
-        local_bind=local_bind,
-        target_ip=target_ip,
-        debug_log=p2_log,
-    )
-    if debug_log is not None and p2_log is not None:
-        debug_log.extend(f"[P2] {line}" for line in p2_log)
+    def _run_p2():
+        p2_results.extend(_p2.discover(
+            timeout_s=timeout_s,
+            attempts=attempts,
+            local_bind=local_bind,
+            target_ip=target_ip,
+            debug_log=p2_log,
+        ))
+
+    t1 = threading.Thread(target=_run_p1, daemon=True)
+    t2 = threading.Thread(target=_run_p2, daemon=True)
+    t1.start()
+    t2.start()
+    # Both protocols' inner loops bound by their own (timeout_s, attempts)
+    # — joining for the same window plus 1s slack catches any thread that
+    # took the long path through retries.
+    deadline = timeout_s * (attempts + 1) + 1.0
+    t1.join(timeout=deadline)
+    t2.join(timeout=deadline)
+
+    if debug_log is not None:
+        debug_log.append("--- P1 discovery ---")
+        if p1_log is not None:
+            debug_log.extend(f"[P1] {line}" for line in p1_log)
+        debug_log.append("--- P2 discovery ---")
+        if p2_log is not None:
+            debug_log.extend(f"[P2] {line}" for line in p2_log)
 
     by_mac: dict[str, DiscoveredRadio] = {}
-    for info in p1:
+    for info in p1_results:
         by_mac[info.mac] = _wrap_p1(info)
     # P2 entries overwrite P1 entries for the same MAC.
-    for info in p2:
+    for info in p2_results:
         by_mac[info.mac] = _wrap_p2(info)
 
     return list(by_mac.values())
