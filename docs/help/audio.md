@@ -109,6 +109,48 @@ protection — which is the common case under normal HF conditions.
 A strong AM broadcast bleed, a nearby contest station, or a quiet
 band suddenly opening with a big DX signal are typical triggers.
 
+#### Auto-LNA pull-up — bidirectional mode (opt-in)
+
+Settings → DSP → **Auto-LNA pull-up** (default OFF) promotes the
+Auto button from back-off-only to **bidirectional**. With pull-up
+on, Auto also *raises* gain when the band has been quiet for a
+while — useful for digging weak signals out of the noise on quiet
+bands without having to ride the slider yourself.
+
+**How pull-up decides to climb (all must hold):**
+
+| Gate | Threshold |
+|---|---|
+| RMS over recent window | < −50 dBFS |
+| Peak over recent window | < −25 dBFS |
+| Sustained-quiet streak | 5 consecutive ticks (~7.5 s) |
+| Time since last manual gain change | > 5 s |
+| Current LNA gain | < +24 dB (auto soft ceiling) |
+
+When all gates pass, Auto climbs by **+1 dB**. The next tick
+re-evaluates from the new gain. Down-steps stay aggressive (2–3
+dB), up-steps stay gentle (1 dB) — the loop reacts fast to
+overload, slow to opportunity.
+
+**Self-limiting:** every +1 dB of LNA raises the noise floor by
+roughly +1 dB. On a typical clean station the climb naturally
+halts when RMS crosses −50 dBFS — usually well before the +24 dB
+ceiling. The ceiling is just a hard backstop in case noise floor
+stays unusually low.
+
+**Manual override always wins.** Touch the slider and pull-up
+defers for 5 seconds, then re-evaluates. If you set LNA manually
+above +24 dB, Auto won't pull it back down (back-off still will,
+on real overload).
+
+**Why it's opt-in:** an earlier Lyra build had a target-chasing
+upward loop that drove LNA to +44 dB on 40 m and produced IMD.
+The current pull-up uses RMS detection (not peak chasing), a
+much lower ceiling, and slow asymmetric stepping — but until
+field-tested across a variety of stations, it stays off by
+default. Turn it on when you want to try it; turn it off if you
+hear odd mixing products on busy bands.
+
 ### AF Gain — makeup gain (post-AGC, pre-Volume)
 
 Slider on the DSP + Audio panel, range 0 to +50 dB. Linear (1 tick =
