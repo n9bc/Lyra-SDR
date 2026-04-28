@@ -1238,27 +1238,40 @@ class SpectrumWidget(_PaintedWidget):
                 gc = (argb >> 8) & 0xFF
                 bc = argb & 0xFF
                 border_alpha = int(round(255 * alpha_mul))
-                tint_alpha   = int(round( 45 * alpha_mul))
+                fill_alpha   = int(round(200 * alpha_mul))
                 text_alpha   = int(round(255 * alpha_mul))
 
                 spot_color = QColor(rc, gc, bc, border_alpha)
-                tint       = QColor(rc, gc, bc, tint_alpha)
+                # Dark semi-opaque fill — gives white text inside max
+                # contrast while the colored border still identifies
+                # the spot type by hue. Standard cluster-display
+                # treatment (DXLab, N1MM+, SpotCollector). Replaces
+                # the prior spot-color tint that blended visually
+                # with the same-colored text.
+                dark_fill  = QColor(20, 22, 28, fill_alpha)
                 text       = s.get("display") or s.get("call", "")
 
                 rect = QRectF(bx, by, tw, box_h)
-                # Outlined box: faint tint + 1 px border in the spot color.
-                p.setBrush(tint)
+                p.setBrush(dark_fill)
                 p.setPen(QPen(spot_color, 1))
                 p.drawRoundedRect(rect, 3, 3)
-                # Text in the spot color (slightly more opaque pen so text
-                # stays legible even when age-fade is kicking in hard).
-                p.setPen(QPen(QColor(rc, gc, bc, text_alpha), 1))
+                # 1 px black drop shadow for that final bit of pop on
+                # bright backgrounds (e.g. spot box overlapping a
+                # bright trace peak).
+                shadow_rect = QRectF(bx + 1, by + 1, tw, box_h)
+                p.setPen(QPen(QColor(0, 0, 0,
+                                     max(180, text_alpha)), 1))
+                p.drawText(shadow_rect, Qt.AlignCenter, text)
+                # White text — pure (255,255,255) reads cleanly
+                # against the dark fill at any age-fade level and
+                # across all spot border colors.
+                p.setPen(QPen(QColor(255, 255, 255, text_alpha), 1))
                 p.drawText(rect, Qt.AlignCenter, text)
-                # Vertical tick from box down to the spectrum trace.
-                tick_pen = QPen(QColor(rc, gc, bc,
-                                       max(80, border_alpha)), 1)
-                p.setPen(tick_pen)
-                p.drawLine(nx, int(by + box_h), nx, h - 18)
+                # NOTE: no vertical drop line — box position already
+                # encodes the spot frequency, and the line was
+                # visually noisy on busy bands. Matches the GPU
+                # backend's rendering and standard SDR-client
+                # convention.
 
 
 class WaterfallWidget(_PaintedWidget):
