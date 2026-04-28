@@ -2136,13 +2136,40 @@ class Radio(QObject):
         if self._filter_board_enabled:
             self._apply_oc_for_current_freq()
         else:
-            self._set_oc_bits(0)
+            # Zero the OC byte on the wire for both protocols. P1 uses
+            # the C&C register (`_set_oc_bits` → `_send_full_config`);
+            # P2 routes through the High Priority packet via P2Stream.
+            if self._protocol == "P2" and self._stream is not None:
+                try:
+                    self._stream.set_oc_bits(0)
+                except Exception as e:
+                    self.status_message.emit(
+                        f"P2 OC clear failed: {e}", 3000)
+                self._oc_bits_current = 0
+                self.oc_bits_changed.emit(0, format_bits(0))
+            else:
+                self._set_oc_bits(0)
         self.filter_board_changed.emit(self._filter_board_enabled)
 
     def _apply_oc_for_current_freq(self):
         band = band_for_freq(self._freq_hz)
         pattern = n2adr_pattern_for_band(band.name if band else "", False)
-        self._set_oc_bits(pattern)
+        if self._protocol == "P2":
+            # P2 routes the same N2ADR-style pattern through the High
+            # Priority packet's open-collector byte. An external filter
+            # board hooked to Apache's OC pins follows along; Apache's
+            # internal Alex bank stays at its current setting (per-band
+            # Alex word switching is a separate backlog item).
+            if self._stream is not None:
+                try:
+                    self._stream.set_oc_bits(pattern)
+                except Exception as e:
+                    self.status_message.emit(
+                        f"P2 OC write failed: {e}", 3000)
+            self._oc_bits_current = pattern & 0x7F
+            self.oc_bits_changed.emit(pattern, format_bits(pattern))
+        else:
+            self._set_oc_bits(pattern)
 
     def _set_oc_bits(self, pattern: int):
         """Store new OC pattern and push to the radio via the config
@@ -2881,10 +2908,9 @@ class Radio(QObject):
         self._audio_sink = self._make_sink()
         self._push_balance_to_sink()
         # Push the filter-board OC pattern now that the stream is live.
-        # OC pins are an HL2-board feature; on P2 the equivalent (Apache
-        # Alex / OC outputs) lives in the High Priority packet and isn't
-        # wired up yet — so skip the OC apply when on P2.
-        if self._filter_board_enabled and self._protocol == "P1":
+        # `_apply_oc_for_current_freq` dispatches between P1 (HL2 C&C
+        # register write) and P2 (Apache OC byte in High Priority).
+        if self._filter_board_enabled:
             self._apply_oc_for_current_freq()
         # Start the ADC-peak broadcaster so the toolbar indicator lights up
         self._peak_report_timer.start()

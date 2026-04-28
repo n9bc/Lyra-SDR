@@ -117,6 +117,14 @@ class P2Stream:
         # Latest known control state — held here so the periodic refresh
         # thread re-sends consistent values.
         self._rx_freq_hz: int = 7_200_000
+        # Open-collector output byte for an external filter board hooked
+        # to Apache's OC pins. Zero by default (no filter board / unused
+        # pins). Updated via `set_oc_bits` on every band change so
+        # external relays follow the operator's tuning. The bit-to-band
+        # mapping is the operator's choice (we just route bits onto the
+        # wire); for an N2ADR-style board, callers pass the same byte
+        # they'd write to HL2's C2[7:1] register.
+        self._oc_bits: int = 0
         self._high_priority_lock = threading.Lock()
 
         self.stats = P2FrameStats()
@@ -295,6 +303,29 @@ class P2Stream:
         # mapping is implemented in Phase 6.
         self._pending_lna_gain_db = gain_db
 
+    def set_oc_bits(self, pattern: int) -> None:
+        """Set the open-collector output byte for the next High Priority
+        send. Used by Radio's band-change pipeline to drive an external
+        filter board hooked to the radio's OC pins. The bits are passed
+        through verbatim — the caller decides the bit-to-band mapping.
+
+        Idempotent on no-change: if the new pattern matches the current
+        value the next refresh fires it anyway (cheap), so callers don't
+        have to dedupe themselves.
+        """
+        with self._high_priority_lock:
+            self._oc_bits = pattern & 0xFF
+            # Push immediately if the stream is live — otherwise the
+            # refresh-thread loop will pick it up at its next tick (1 s).
+            # Swallow socket errors here: if the stream is mid-stop the
+            # next refresh handles cleanup; we don't want band-change
+            # in the GUI to blow up because of a network hiccup.
+            if self._send_sock is not None:
+                try:
+                    self._send_high_priority_locked()
+                except OSError:
+                    pass
+
     def queue_tx_audio(self, audio) -> None:
         """v1 raises — TX over P2 is out of scope. Kept on the surface so
         higher-level code can call this method on either stream class."""
@@ -322,14 +353,21 @@ class P2Stream:
         # Hermes-class).
         ddc_freqs = {0: self._rx_freq_hz, 1: self._rx_freq_hz}
         ddc_freqs[self._rx1_ddc_index] = self._rx_freq_hz
+        # OC bits track band-change updates from `set_oc_bits`. Default
+        # 0 = unused; the wire-capture default `0x90` from the working
+        # 20m capture is preserved as a fallback when no caller has
+        # written a band-specific value yet.
+        oc_byte = self._oc_bits if self._oc_bits != 0 else (
+            0x90 if self._rx1_ddc_index >= 2 else 0)
         cfg = HighPriorityConfig(
             run=True,
             ddc_freqs_hz=ddc_freqs,
             # Wire-captured Alex control words for an idle ANAN-G2 on 20 m.
-            # Future work: derive per-band from the current frequency.
+            # Future work: derive per-band from the current frequency
+            # (needs Apache hardware doc bit-to-band map).
             alex0_word=0x01100010 if self._rx1_ddc_index >= 2 else 0,
             alex1_word=0x01100002 if self._rx1_ddc_index >= 2 else 0,
-            open_collector_outputs=0x90 if self._rx1_ddc_index >= 2 else 0,
+            open_collector_outputs=oc_byte,
         )
         self._send_sock.sendto(
             build_high_priority_packet(self._seq_high_priority, cfg),
