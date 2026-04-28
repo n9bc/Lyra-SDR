@@ -142,10 +142,10 @@ class HighPriorityPhaseEncodingTest(unittest.TestCase):
         self.assertEqual(struct.unpack(">I", pkt[9:13])[0], 0)
         self.assertEqual(struct.unpack(">I", pkt[13:17])[0], 0)
 
-    def test_known_thetis_capture_value(self) -> None:
-        # From the captured Thetis session against the real ANAN-G2:
+    def test_known_wire_capture_value(self) -> None:
+        # From a wire-capture session against the real ANAN-G2:
         # DDC2 wire value 0x150E06F6 → ~10.106 MHz (30 m). Round-trip
-        # the captured phase back to the freq Thetis was tuned to.
+        # the captured phase back to the frequency the radio was tuned to.
         captured_phase = 0x150E06F6
         freq = phase_to_freq_hz(captured_phase)
         self.assertAlmostEqual(freq, 10_106_301, delta=10)

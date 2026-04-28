@@ -177,8 +177,8 @@ def build_general_packet(seq: int, cfg: GeneralPacketConfig) -> bytes:
     pkt[27] = cfg.wideband_update_rate_ms & 0xFF
     pkt[28] = cfg.wideband_packets_per_frame & 0xFF
     # 29..36 reserved (memory mapped / envelope PWM dot clock — leave zero;
-    # Thetis writes some bytes here but pi-hpsdr leaves them zero and
-    # ANAN-G2 streams happily either way).
+    # some clients write into this region but pi-hpsdr leaves it zero
+    # and ANAN-G2 streams happily either way).
     pkt[37] = 0x08 if cfg.phase_mode else 0x00
     pkt[38] = 0x01 if cfg.enable_hardware_timer else 0x00
     pkt[39] = cfg.endian_and_iq_format & 0xFF
@@ -272,8 +272,8 @@ class HighPriorityConfig:
     Alex0 / Alex1 control words drive the BPF / LPF / antenna relays.
     On ORION2 / SATURN both words must be set to non-zero "open the
     receive path" values or the input is muted. The defaults here
-    mirror what Thetis sends for an idle ANAN-G2 on 20 m; future
-    revisions should derive these from the current frequency.
+    mirror values observed on the wire for an idle ANAN-G2 on 20 m;
+    future revisions should derive these from the current frequency.
     """
     run: bool = False
     ptt: tuple[bool, bool, bool, bool] = (False, False, False, False)

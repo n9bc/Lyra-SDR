@@ -5,7 +5,7 @@ Type"). When a new ID is seen in the wild, add a row here. Note that
 some "ANAN-look-alike" homebrew transceivers (notably the Lin00bs /
 EU1SW Brick II) report themselves as Hermes-Lite (board ID 6) on the
 wire because they run Hermes-Lite gateware — they don't have a
-dedicated board ID, and pi-hpsdr / Thetis don't list one either.
+dedicated board ID, and pi-hpsdr doesn't list one either.
 
 The `family` field lets higher layers group radios for UI purposes
 ("show all my Apache rigs") without scattering board-ID literals.
