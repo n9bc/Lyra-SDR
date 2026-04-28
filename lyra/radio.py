@@ -583,7 +583,8 @@ class Radio(QObject):
         # Keep `_nr_profile` separate from the processor's internal
         # value so the UI can expose a "neural" placeholder even when
         # the processor itself only supports the classical profiles.
-        self._nr_profile = SpectralSubtractionNR.DEFAULT_PROFILE
+        from lyra.dsp.nr import SpectralSubtractionNR as _SSNR
+        self._nr_profile = _SSNR.DEFAULT_PROFILE
 
         # ── FFT ring buffer ───────────────────────────────────────────
         self._fft_size = 4096
