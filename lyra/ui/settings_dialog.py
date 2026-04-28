@@ -1282,6 +1282,31 @@ class VisualsSettingsTab(QWidget):
             if self.auto_scale_chk.isChecked() != on else None)
         gd.addWidget(self.auto_scale_chk, 10, 0, 1, 3, Qt.AlignLeft)
 
+        # Independent waterfall auto-scale toggle. Default ON (waterfall
+        # tracks the spectrum auto-scale). When OFF the waterfall stays
+        # at whatever min/max sliders the operator set, regardless of
+        # band activity — useful for the 'fixed darker waterfall so
+        # signals pop' look. Sits right below the spectrum auto-scale
+        # so both toggles are visually grouped.
+        self.wf_auto_scale_chk = QCheckBox(
+            "Waterfall auto-range follows spectrum")
+        self.wf_auto_scale_chk.setChecked(radio.waterfall_auto_scale)
+        self.wf_auto_scale_chk.setToolTip(
+            "When ON (default): the waterfall's dB range tracks the\n"
+            "spectrum auto-scale, so the heatmap fits each band's\n"
+            "actual signal levels.\n\n"
+            "When OFF: the waterfall stays at the Waterfall min/max\n"
+            "sliders above. Useful if you prefer a fixed darker\n"
+            "waterfall (set Waterfall max higher than your strongest\n"
+            "regular signal) so transient peaks pop visually."
+        )
+        self.wf_auto_scale_chk.toggled.connect(
+            self.radio.set_waterfall_auto_scale)
+        radio.waterfall_auto_scale_changed.connect(
+            lambda on: self.wf_auto_scale_chk.setChecked(on)
+            if self.wf_auto_scale_chk.isChecked() != on else None)
+        gd.addWidget(self.wf_auto_scale_chk, 11, 0, 1, 3, Qt.AlignLeft)
+
         # Noise-floor marker toggle sits with the other spectrum
         # appearance controls. Default on — it's a quiet, informative
         # reference without adding visual clutter.

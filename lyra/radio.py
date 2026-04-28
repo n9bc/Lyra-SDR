@@ -121,6 +121,7 @@ class Radio(QObject):
     spectrum_cal_db_changed    = Signal(float)         # operator cal trim, dB
     smeter_cal_db_changed      = Signal(float)         # S-meter cal trim, dB
     spectrum_auto_scale_changed = Signal(bool)          # auto-fit on/off
+    waterfall_auto_scale_changed = Signal(bool)         # waterfall auto-fit on/off
     waterfall_db_range_changed = Signal(float, float)  # (min_db, max_db)
     # RX filter passband (for panadapter overlay) — (low_offset_hz, high_offset_hz)
     # relative to the tuned center frequency. Recomputed whenever mode or
@@ -525,6 +526,13 @@ class Radio(QObject):
         self._auto_scale_peak_history: list[float] = []
         self._waterfall_min_db  = -140.0
         self._waterfall_max_db  = -60.0
+        # Operator preference — when True (default) the waterfall's
+        # dB range tracks the spectrum auto-scale on each tick. When
+        # False the waterfall stays at whatever min/max the operator
+        # set in Settings → Visuals, regardless of band activity. Some
+        # operators prefer a fixed darker waterfall so weaker signals
+        # 'pop' against a near-black background; this gives them that.
+        self._waterfall_auto_scale = True
         # Zoom (panadapter scaling). 1.0 = full sample-rate span;
         # higher values crop to centered bins and report a reduced
         # rate so SpectrumWidget + WaterfallWidget auto-scale their
@@ -2157,6 +2165,20 @@ class Radio(QObject):
         self.spectrum_auto_scale_changed.emit(on)
 
     @property
+    def waterfall_auto_scale(self) -> bool:
+        """If True, the waterfall dB range mirrors the spectrum auto-
+        scale on each tick. If False, the waterfall keeps the
+        operator's manually set min/max regardless of band activity."""
+        return self._waterfall_auto_scale
+
+    def set_waterfall_auto_scale(self, on: bool):
+        on = bool(on)
+        if on == self._waterfall_auto_scale:
+            return
+        self._waterfall_auto_scale = on
+        self.waterfall_auto_scale_changed.emit(on)
+
+    @property
     def waterfall_db_range(self) -> tuple[float, float]:
         return (self._waterfall_min_db, self._waterfall_max_db)
 
@@ -2911,13 +2933,15 @@ class Radio(QObject):
                 self.set_spectrum_db_range(
                     target_lo, target_hi, from_user=False)
                 # Mirror the same range to the waterfall so its
-                # heatmap fits the band's actual dynamic range too.
-                # Without this the waterfall stays at its default
-                # (-140..-60) regardless of band — operators had to
-                # manually slide its min/max in Settings to see any
-                # color on a band where signals don't naturally fill
-                # that window.
-                self.set_waterfall_db_range(target_lo, target_hi)
+                # heatmap fits the band's actual dynamic range too —
+                # but ONLY if the operator has waterfall auto-scale
+                # enabled (default). Some operators prefer a fixed
+                # darker waterfall so weaker signals 'pop' against a
+                # near-black background; turning waterfall auto-scale
+                # off in Settings lets them keep that look while the
+                # spectrum still auto-fits.
+                if self._waterfall_auto_scale:
+                    self.set_waterfall_db_range(target_lo, target_hi)
         elif self._auto_scale_peak_history:
             # Auto turned off — drop the history so it doesn't grow
             # unbounded if the operator never re-enables.

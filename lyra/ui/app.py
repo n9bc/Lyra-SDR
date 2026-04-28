@@ -535,11 +535,12 @@ class MainWindow(QMainWindow):
         settings_action.triggered.connect(self._open_settings)
         tb.addAction(settings_action)
 
-        # ── 5. Reset Panel Layout ──────────────────────────────────
-        reset = QAction("Reset Panel Layout", self)
-        reset.setToolTip("Restore the default panel arrangement")
-        reset.triggered.connect(self._reset_layout)
-        tb.addAction(reset)
+        # ── 5. (Reset Panel Layout used to live here; moved off the
+        #       toolbar after operator reported accidental clicks
+        #       blowing away their custom layout. Still available
+        #       via View menu → "Reset Panel Layout" so it's not
+        #       lost — just not next to Settings where you can hit
+        #       it with one stray click.) ──────────────────────────
 
         tb.addSeparator()
 
@@ -1694,6 +1695,9 @@ class MainWindow(QMainWindow):
         if s.contains("spectrum_auto_scale"):
             r.set_spectrum_auto_scale(
                 s.value("spectrum_auto_scale") in (True, "true", "True", 1, "1"))
+        if s.contains("waterfall_auto_scale"):
+            r.set_waterfall_auto_scale(
+                s.value("waterfall_auto_scale") in (True, "true", "True", 1, "1"))
         if s.contains("pc_audio_device"):
             v = s.value("pc_audio_device")
             try:
@@ -1959,6 +1963,7 @@ class MainWindow(QMainWindow):
         s.setValue("af_gain_db", r.af_gain_db)
         s.setValue("audio_output", r.audio_output)
         s.setValue("spectrum_auto_scale", r.spectrum_auto_scale)
+        s.setValue("waterfall_auto_scale", r.waterfall_auto_scale)
         # PC Soundcard device index — None = auto, int = specific
         # PortAudio device. Stored as string "auto" or the int as
         # str so QSettings round-trips cleanly across platforms.
