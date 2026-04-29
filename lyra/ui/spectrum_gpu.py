@@ -118,8 +118,21 @@ GL_CLAMP_TO_EDGE         = 0x812F
 GL_UNPACK_ALIGNMENT      = 0x0CF5
 GL_VIEWPORT              = 0x0BA2
 
-# Where the GLSL source files live, relative to this module.
-_SHADER_DIR = Path(__file__).resolve().parent / "spectrum_gpu_shaders"
+# Where the GLSL source files live. Resolved via lyra.resource_root()
+# so the path works in BOTH the dev tree (Path(__file__).parent.parent
+# of the lyra package == project root) and in PyInstaller frozen
+# builds (sys._MEIPASS == bundle root). The build/lyra.spec bundles
+# these at lyra/ui/spectrum_gpu_shaders/ so the relative path matches.
+#
+# Earlier this used `Path(__file__).resolve().parent / "spectrum_gpu_shaders"`,
+# which broke in PyInstaller folder-mode bundles: when modules live
+# inside the lyra.pyz archive, __file__ reports a path inside that
+# archive that isn't a real on-disk directory. The shader programs
+# silently linked with empty source → washed-out trace + blank
+# waterfall in the .exe even though dev tree was clean.
+import lyra as _lyra
+_SHADER_DIR = (_lyra.resource_root() / "lyra" / "ui" /
+               "spectrum_gpu_shaders")
 
 
 def lyra_gl_format() -> QSurfaceFormat:

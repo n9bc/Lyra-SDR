@@ -30,6 +30,15 @@ datas = [
     (str(PROJECT_ROOT / "docs" / "help"), "docs/help"),
     # App icons + logo PNG. Used by the title bar / About / startup.
     (str(PROJECT_ROOT / "assets" / "logo"), "assets/logo"),
+    # GPU panadapter shaders (GLSL .vert / .frag). Loaded at runtime
+    # by spectrum_gpu.py via Path(__file__) / "spectrum_gpu_shaders".
+    # Without this, the frozen .exe initializes the GL programs with
+    # empty shader source — rendering becomes garbage (washed-out
+    # trace, blank waterfall) while the QPainter overlays continue
+    # to work. Bundled into lyra/ui/spectrum_gpu_shaders/ so the
+    # runtime path matches the dev-tree path.
+    (str(PROJECT_ROOT / "lyra" / "ui" / "spectrum_gpu_shaders"),
+     "lyra/ui/spectrum_gpu_shaders"),
     # DXCC country prefix database used by TCI spot enrichment.
     # Lazily loaded; if missing, country flags just don't render —
     # but we ship it because operators expect spot flags to work.
