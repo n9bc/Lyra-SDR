@@ -196,6 +196,82 @@ class HighPriorityTest(unittest.TestCase):
         self.assertEqual(struct.unpack(">I", pkt[1428:1432])[0], 0x01100002)
         self.assertEqual(struct.unpack(">I", pkt[1432:1436])[0], 0x01100010)
 
+    def test_adc_step_attenuators(self) -> None:
+        # bytes 1442 = ADC1, 1443 = ADC0 — pi-hpsdr layout.
+        pkt = build_high_priority_packet(
+            seq=0,
+            cfg=HighPriorityConfig(
+                run=True, adc0_step_atten_db=12, adc1_step_atten_db=5,
+            ),
+        )
+        self.assertEqual(pkt[1443], 12, "ADC0 step atten at byte 1443")
+        self.assertEqual(pkt[1442], 5, "ADC1 step atten at byte 1442")
+
+    def test_step_attenuator_clamps_above_31(self) -> None:
+        pkt = build_high_priority_packet(
+            seq=0,
+            cfg=HighPriorityConfig(run=True, adc0_step_atten_db=99),
+        )
+        self.assertEqual(pkt[1443], 31, "above-range value must clamp to 31 dB")
+
+    def test_step_attenuator_clamps_below_0(self) -> None:
+        pkt = build_high_priority_packet(
+            seq=0,
+            cfg=HighPriorityConfig(run=True, adc0_step_atten_db=-5),
+        )
+        self.assertEqual(pkt[1443], 0, "negative value must clamp to 0 dB")
+
+
+class P2StreamLnaGainTest(unittest.TestCase):
+    """`P2Stream.set_lna_gain_db` translates operator gain into the
+    Apache step-attenuator scale. We test the translation alone here
+    without bringing up the network sockets."""
+
+    def _stub_stream(self):
+        from lyra.protocol.p2.stream import P2Stream
+        # Construct without start(); only the in-memory state is exercised.
+        s = P2Stream("127.0.0.1", sample_rate=192000, board_id=10)
+        return s
+
+    def test_default_atten_is_zero(self):
+        s = self._stub_stream()
+        self.assertEqual(s._adc0_step_atten_db, 0)
+
+    def test_gain_31_no_attenuation(self):
+        s = self._stub_stream()
+        s.set_lna_gain_db(31)
+        self.assertEqual(s._adc0_step_atten_db, 0)
+
+    def test_gain_19_default_mid_atten(self):
+        # The HL2 default gain of 19 should give a sane mid-range Apache
+        # attenuation — picking 12 here pins the linear formula.
+        s = self._stub_stream()
+        s.set_lna_gain_db(19)
+        self.assertEqual(s._adc0_step_atten_db, 12)
+
+    def test_gain_zero_max_attenuation(self):
+        s = self._stub_stream()
+        s.set_lna_gain_db(0)
+        self.assertEqual(s._adc0_step_atten_db, 31)
+
+    def test_gain_negative_clamps_to_max_atten(self):
+        s = self._stub_stream()
+        s.set_lna_gain_db(-12)
+        self.assertEqual(s._adc0_step_atten_db, 31)
+
+    def test_gain_above_31_clamps_to_zero_atten(self):
+        s = self._stub_stream()
+        s.set_lna_gain_db(48)
+        self.assertEqual(s._adc0_step_atten_db, 0)
+
+    def test_repeated_same_value_is_idempotent(self):
+        # Same gain twice in a row: second call should be a no-op even
+        # before hitting the wire (early-return inside the lock).
+        s = self._stub_stream()
+        s.set_lna_gain_db(19)
+        s.set_lna_gain_db(19)
+        self.assertEqual(s._adc0_step_atten_db, 12)
+
 
 if __name__ == "__main__":
     unittest.main()

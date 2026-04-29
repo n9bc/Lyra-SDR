@@ -287,6 +287,11 @@ class HighPriorityConfig:
     phase_mode: bool = True                         # Hz → phase on the wire
     alex0_word: int = 0                             # bytes 1432..1435 BE
     alex1_word: int = 0                             # bytes 1428..1431 BE
+    # ADC step attenuators in dB. Apache hardware: 0 = no attenuation
+    # (max sensitivity), 31 = maximum attenuation. ADC0 = RX1 path,
+    # ADC1 = RX2 / diversity path. v1 uses ADC0 only.
+    adc0_step_atten_db: int = 0                     # byte 1443
+    adc1_step_atten_db: int = 0                     # byte 1442
 
     def __post_init__(self) -> None:
         if self.ddc_freqs_hz is None:
@@ -348,6 +353,12 @@ def build_high_priority_packet(seq: int, cfg: HighPriorityConfig) -> bytes:
         struct.pack_into(">I", pkt, 1428, cfg.alex1_word & 0xFFFFFFFF)
     if cfg.alex0_word:
         struct.pack_into(">I", pkt, 1432, cfg.alex0_word & 0xFFFFFFFF)
+
+    # ADC step attenuators (one byte each). Range 0..31 dB on Apache;
+    # values outside that get clamped here so wire bytes are always
+    # legal regardless of caller hygiene.
+    pkt[1442] = max(0, min(31, cfg.adc1_step_atten_db))
+    pkt[1443] = max(0, min(31, cfg.adc0_step_atten_db))
 
     return bytes(pkt)
 

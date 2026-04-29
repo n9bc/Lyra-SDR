@@ -126,6 +126,11 @@ class P2Stream:
         # wire); for an N2ADR-style board, callers pass the same byte
         # they'd write to HL2's C2[7:1] register.
         self._oc_bits: int = 0
+        # ADC0 step attenuator in dB (0..31). Apache hardware doesn't
+        # expose an LNA gain dial; operator gain is controlled by the
+        # step attenuator only. set_lna_gain_db converts the operator's
+        # signed-dB gain into a clamped attenuation value here.
+        self._adc0_step_atten_db: int = 0
         self._high_priority_lock = threading.Lock()
 
         self.stats = P2FrameStats()
@@ -298,11 +303,36 @@ class P2Stream:
         self._seq_ddc_specific += 1
 
     def set_lna_gain_db(self, gain_db: int) -> None:
-        """v1: not yet wired (Apache LNA control lives in High Priority too,
-        but the byte layout differs across boards). Stored for future use."""
-        # Accept the value silently; effective when the per-board gain
-        # mapping is implemented in Phase 6.
-        self._pending_lna_gain_db = gain_db
+        """Translate operator gain (signed dB, HL2 convention) into the
+        Apache step-attenuator value (0..31 dB, unsigned) and apply it
+        on the next High Priority send.
+
+        Apache hardware doesn't have a software-settable LNA gain — the
+        front-end gain is fixed at the firmware level and the only
+        operator-accessible knob is the ADC step attenuator. We map
+        Lyra's gain dial linearly into the attenuator's 32-step range:
+
+            atten_db = clamp(31 - gain_db, 0..31)
+
+        which means: gain_db = 31 → no attenuation (max sensitivity),
+        gain_db =  0 → 31 dB attenuation (deafest), and gain_db < 0 or
+        > 31 saturates at the corresponding extreme. The HL2 default
+        gain of 19 dB lands at 12 dB Apache attenuation — sane mid-
+        range starting point for HF.
+
+        Idempotent on the wire: writing the same atten value just
+        emits an identical High Priority packet, no state confusion.
+        """
+        atten = max(0, min(31, 31 - int(gain_db)))
+        with self._high_priority_lock:
+            if atten == self._adc0_step_atten_db:
+                return
+            self._adc0_step_atten_db = atten
+            if self._send_sock is not None:
+                try:
+                    self._send_high_priority_locked()
+                except OSError:
+                    pass
 
     def set_oc_bits(self, pattern: int) -> None:
         """Set the open-collector output byte for the next High Priority
@@ -360,6 +390,11 @@ class P2Stream:
         # written a band-specific value yet.
         oc_byte = self._oc_bits if self._oc_bits != 0 else (
             0x90 if self._rx1_ddc_index >= 2 else 0)
+        # ADC0 step attenuator: tracked here, updated by set_lna_gain_db
+        # which translates the operator's gain knob into Apache's 0..31
+        # attenuation scale. Pre-Apache boards leave this at 0 (no atten);
+        # they have their own gain control via C&C registers (HL2Stream).
+        adc0_atten = self._adc0_step_atten_db
         # Alex0 / Alex1 control words drive the BPF + TX LPF relays on
         # ORION2-class boards. Computing per-frequency from the openHPSDR
         # public hardware register map (see lyra.protocol.p2.alex).
@@ -377,6 +412,7 @@ class P2Stream:
             alex0_word=alex0,
             alex1_word=alex1,
             open_collector_outputs=oc_byte,
+            adc0_step_atten_db=adc0_atten,
         )
         self._send_sock.sendto(
             build_high_priority_packet(self._seq_high_priority, cfg),
