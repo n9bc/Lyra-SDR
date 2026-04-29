@@ -380,7 +380,7 @@ class RadioSettingsTab(QWidget):
         g.addWidget(self.ip_edit, 0, 1)
 
         self.discover_btn = QPushButton("Discover")
-        self.discover_btn.setToolTip("Broadcast on the LAN to find HL2 radios")
+        self.discover_btn.setToolTip("Broadcast on the LAN to find HPSDR radios (HL2, Apache ANAN-G2, etc.)")
         self.discover_btn.clicked.connect(self._on_discover)
         g.addWidget(self.discover_btn, 0, 2)
 

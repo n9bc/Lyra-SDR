@@ -258,6 +258,25 @@ Source: ExpertSDR3 manual pp. 70-95. Full feature set for eventual parity.
 
 - [x] **Full-duplex** — already enabled (C4 bit 2 set in config register).
       Required for pre-distortion and for proper HL2/HL2+ PA operation.
+- [/] **HPSDR Protocol 2 (Apache ANAN G2 / Brick II)** — RX-only Phase 1-3
+      shipped on `feat/protocol-2-apache` (2026-04-26). Discovery, packet
+      encoders, P2Stream, board lookup table (Atlas/Hermes/Orion/Saturn),
+      synthetic-radio loopback for hardware-free testing. End-to-end
+      verified against the loopback. Outstanding: Phase 5 = Radio-class
+      integration so the UI can pick a P2 radio from the connection
+      dropdown; Phase 6 = TX over P2 (DUC, DUCIQ, mic-in routing). See
+      `docs/superpowers/specs/2026-04-26-protocol-2-apache-design.md`.
+      Lin00bs / EU1SW Brick II is **not** a separate board ID — it's
+      a homebrew Hermes-Lite-gateware rig that identifies as board 6
+      (Hermes Lite) on the wire and rides the existing HL row. Variant
+      naming is handled by `boards.friendly_name()` based on firmware
+      version. See `docs/p2-bringup.md`.
+      **REAL-HARDWARE GAP (2026-04-26)**: live test against an ANAN-G2
+      with v4.3 firmware streamed zero IQ frames. Wire-capture vs
+      pi-hpsdr cross-reference identified six fixes needed (phase-mode
+      bit, DDC2 vs DDC0 slot offset, kHz vs Hz units, Alex enable,
+      DUC Specific at startup, RSC-coalesced IQ frames). Full byte-level
+      analysis with concrete remediation in `docs/p2-anan-g2-findings.md`.
 - [ ] **TX path** — SSB modulator, PTT, CW keyer, RTTY/FSK, AK4951 mic
       input vs PC mic selectable. User's preferred mic path: AK4951.
 - [ ] **PA protection** / fault monitoring — HL2 I/O board registers
