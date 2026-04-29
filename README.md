@@ -241,12 +241,22 @@ troubleshooting guide in the in-app User Guide (press **F1**).
 - Hermes Lite 2: http://hermeslite.com/
 - Hermes Lite 2+: https://www.hermeslite2plus.com/
 
-## Design references (cited, not copied)
+## Relationship to Thetis / WDSP / openHPSDR
 
-Lyra is **not** derived from Thetis (the openHPSDR reference
-client) or ExpertSDR3 source code — those projects are consulted
-only as design references and protocol cross-checks. See `NOTICE.md`
-for full third-party disclosures.
+Lyra v0.0.5 and earlier (under MIT) were a clean-room implementation
+referencing only protocol documentation and operator-visible UI
+behavior — no Thetis source was incorporated.
+
+Starting with v0.0.6 (under GPL v3 or later), Lyra is in full
+license compatibility with the openHPSDR ecosystem. Future releases
+may directly incorporate or link with GPL'd ham-radio libraries
+(notably WDSP for PureSignal, CESSB, and advanced TX). All such
+incorporations preserve upstream copyright + GPL terms; see
+`NOTICE.md` for ongoing third-party disclosures.
+
+ExpertSDR3 is closed-source commercial software from Expert
+Electronics — referenced from published manuals as a design
+inspiration only, no code involvement.
 
 ## Backlog
 
@@ -256,6 +266,31 @@ testers.
 
 ## License
 
-MIT — see `LICENSE`.
+**GNU General Public License v3.0 or later** — see `LICENSE`.
 
-© Rick Langford (N8SDR)
+Lyra was originally released under the MIT License up through
+**v0.0.5 ("Listening Tools")**. Starting with v0.0.6, Lyra is
+relicensed under **GPL v3 or later** to match the licensing of the
+broader openHPSDR / WDSP ecosystem and to enable future integration
+with WDSP-based features (PureSignal, CESSB, advanced TX). Past
+releases (≤ v0.0.5) remain under their original MIT terms; the
+relicense applies only to v0.0.6 and later.
+
+What this means in practice:
+
+- You can use Lyra for any purpose, including commercial use
+- You can modify Lyra freely
+- You can redistribute Lyra and your modifications — but the result
+  must also be GPL v3 (or later), and you must make source available
+
+What it does NOT change:
+
+- Donations are still welcome (PayPal, etc.) — GPL doesn't restrict
+  receiving payment for the project
+- Operators can run Lyra free of charge, no strings attached
+- The complete source remains public on GitHub
+
+For the canonical GPL v3 text, see `LICENSE` in this repository or
+<https://www.gnu.org/licenses/gpl-3.0.html>.
+
+© 2026 Rick Langford (N8SDR)

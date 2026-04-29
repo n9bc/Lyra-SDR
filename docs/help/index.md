@@ -66,8 +66,12 @@ attaching to bug reports.
 
 ## License
 
-Lyra is released under the **MIT License**.
-See the `LICENSE` file at the project root for the full terms.
+Lyra (v0.0.6 and onward) is released under the **GNU General Public
+License v3 or later**. v0.0.5 and earlier were released under the
+MIT License; that history is preserved.
+
+See the `LICENSE` file at the project root for the full terms, or
+the in-app **License** topic for a plain-English summary.
 
 Lyra is an independent, clean-room implementation. The code is
 not derived from any other SDR client's source. Other established

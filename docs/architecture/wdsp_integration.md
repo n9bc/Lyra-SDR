@@ -211,34 +211,36 @@ WD-1 kickoff:
 
 **Decision deferred** to Phase WD-1 kickoff.
 
-## 6. License compatibility — MUST VERIFY before WD-1
+## 6. License compatibility — RESOLVED ✓
 
-⚠️ **OPEN QUESTION.** I do not have current verified information
-on WDSP's license terms. Before any WD-1 work begins, we must:
+**Status: license question resolved 2026-04-29.**
 
-1. Read the WDSP source repository's LICENSE file directly
-2. Confirm the license terms (MIT? BSD? Apache? GPL? LGPL?)
-3. Verify compatibility with Lyra's MIT license
+- **WDSP** is licensed under **GNU GPL v2 or any later version**
+  (verified by reading source-file headers in the TAPR/OpenHPSDR-wdsp
+  repository).
+- **Thetis** is GPL v2 (or later, per WDSP's terms).
+- **Lyra** as of v0.0.6 is **GPL v3 or later** (relicensed from
+  MIT specifically to enable openHPSDR ecosystem integration).
 
-**If WDSP turns out to be GPL** (which is common for ham-radio C
-libraries), bundling it with Lyra in a single installer may
-trigger GPL copyleft obligations on Lyra itself, which we don't
-want. Acceptable mitigations would be:
+These licenses are mutually compatible. Lyra (GPL v3+) can directly
+use WDSP (GPL v2 or later → upgradeable to v3) with no licensing
+gymnastics required. Direct linking, bundling in the installer,
+shipping wdsp.dll alongside Lyra.exe — all permitted.
 
-- **Keep WDSP as an external dependency** that operators install
-  separately (no bundling — Lyra dynamically links/loads the DLL
-  if present, falls back to native if not). This keeps Lyra MIT.
-- **Distribute WDSP from a separate "Lyra-WDSP-bridge" repo**
-  with its own license that's compatible with WDSP's. Lyra-MIT
-  imports the bridge as a dependency.
+### What this means in practice
 
-**If WDSP is permissive** (MIT/BSD/Apache/etc.): bundling is fine,
-attribution goes in `NOTICE.md`.
+- **Bundle wdsp.dll directly** with the Lyra installer
+- **Direct linking via ctypes** is fine
+- **No subprocess/sidecar workaround** needed
+- **Attribution required** in `NOTICE.md` (which already lists
+  WDSP) and any source files we incorporate keep their headers
+- **Modifications to WDSP** that we ship must be available in
+  source form, just like our own source
 
-This is a **gating decision** for Phase WD-1 — we don't write any
-ctypes binding code until the license question is settled. Until
-then this doc assumes "permissive license, bundling allowed";
-revise if reality differs.
+The earlier draft of this doc assumed Lyra was MIT-only and laid
+out elaborate workarounds (subprocess sidecar). That version is
+superseded — the GPL relicense (effective v0.0.6) makes Phase WD-1
+straightforward.
 
 ## 7. Settings UX preview
 

@@ -80,8 +80,15 @@ is kept current.
 
 ## Who's behind Lyra
 
-Lyra is written by **Rick Langford (N8SDR)** and released under the
-MIT License. See `LICENSE` for terms and `NOTICE.md` for the full
-list of dependencies and design references.
+Lyra is written by **Rick Langford (N8SDR)**.
+
+Versions through v0.0.5 are released under the MIT License.
+Starting with v0.0.6, Lyra is released under the **GNU General
+Public License v3 or later** to align with the wider openHPSDR /
+WDSP ecosystem and to enable future direct integration with
+WDSP-based features (PureSignal, CESSB).
+
+See `LICENSE` for terms and `NOTICE.md` for the full list of
+dependencies and design references.
 
 73 and good DX.

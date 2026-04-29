@@ -1,8 +1,9 @@
 # Support Lyra — Buy the developer a coffee ☕
 
-Lyra is **free**, **open-source** (MIT licensed), and built by one
-person — Rick Langford, **N8SDR** — in his spare time. There are
-no ads, no telemetry, no subscription tier, no "pro" upsells.
+Lyra is **free**, **open-source** (GPL v3 or later — see the
+**License** topic for details), and built by one person — Rick
+Langford, **N8SDR** — in his spare time. There are no ads, no
+telemetry, no subscription tier, no "pro" upsells.
 
 If Lyra has saved you from a clunky SDR workflow, helped you work a
 new state on FT8, or just makes your shack a little more
@@ -46,16 +47,19 @@ Issue tracker: [github.com/N8SDR1/Lyra-SDR/issues](https://github.com/N8SDR1/Lyr
 
 ## License summary
 
-Lyra is released under the **MIT License** — see the next help topic
-for the full text. The short version:
+Lyra v0.0.6+ is released under the **GNU General Public License
+v3 or later** — see the next help topic for the full details. The
+short version:
 
 - **You can use it** for any purpose (personal, commercial, contesting,
   whatever)
 - **You can modify it** and redistribute your modifications
-- **You must include** the original copyright notice if you
-  redistribute
+- **Your modifications must also be GPL v3+** if you redistribute,
+  and you must make the source available
 - **No warranty** — software is provided "as is"
 
 That's it. No usage tracking, no phone-home, no license server.
+Donations are still very welcome (GPL doesn't restrict accepting
+money for a project).
 
 73 de **N8SDR**
