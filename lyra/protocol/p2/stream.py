@@ -20,6 +20,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from lyra.protocol.p2.alex import alex0_word_for, alex1_word_for
 from lyra.protocol.p2.boards import lookup_board
 from lyra.protocol.p2.packets import (
     DDC_IQ_FRAME_LEN_24BIT,
@@ -359,14 +360,22 @@ class P2Stream:
         # written a band-specific value yet.
         oc_byte = self._oc_bits if self._oc_bits != 0 else (
             0x90 if self._rx1_ddc_index >= 2 else 0)
+        # Alex0 / Alex1 control words drive the BPF + TX LPF relays on
+        # ORION2-class boards. Computing per-frequency from the openHPSDR
+        # public hardware register map (see lyra.protocol.p2.alex).
+        # Pre-Apache boards use a different bit layout for the same
+        # word, so we leave them at 0.
+        if self._rx1_ddc_index >= 2:
+            alex0 = alex0_word_for(self._rx_freq_hz)
+            alex1 = alex1_word_for(self._rx_freq_hz)
+        else:
+            alex0 = 0
+            alex1 = 0
         cfg = HighPriorityConfig(
             run=True,
             ddc_freqs_hz=ddc_freqs,
-            # Wire-captured Alex control words for an idle ANAN-G2 on 20 m.
-            # Future work: derive per-band from the current frequency
-            # (needs Apache hardware doc bit-to-band map).
-            alex0_word=0x01100010 if self._rx1_ddc_index >= 2 else 0,
-            alex1_word=0x01100002 if self._rx1_ddc_index >= 2 else 0,
+            alex0_word=alex0,
+            alex1_word=alex1,
             open_collector_outputs=oc_byte,
         )
         self._send_sock.sendto(
